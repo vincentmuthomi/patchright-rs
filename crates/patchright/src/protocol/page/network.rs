@@ -1,0 +1,446 @@
+use super::Page;
+use crate::error::{Error, Result};
+use crate::protocol::Route;
+use crate::protocol::route::UnrouteBehavior;
+use crate::server::channel_owner::ChannelOwner;
+use std::future::Future;
+
+impl Page {
+    /// PATCHRIGHT: installs the init-script injection route on this page,
+    /// unless it or its context already has one (`installInjectRoute`
+    /// upstream). See [`crate::patchright`].
+    pub(crate) async fn install_inject_route(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if self.route_handlers.injecting.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Ok(context) = self.context()
+            && context.inject_route_installed()
+        {
+            return Ok(());
+        }
+        if self.route_handlers.injecting.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let installed = self
+            .route("**/*", crate::patchright::inject_route_handler)
+            .await;
+        if installed.is_err() {
+            self.route_handlers.injecting.store(false, Ordering::SeqCst);
+        }
+        installed
+    }
+}
+
+/// Network interception: routes, HAR replay, WebSocket routes and extra headers.
+///
+/// ```no_run
+/// # use patchright_rs::Playwright;
+/// # use patchright_rs::protocol::FulfillOptions;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let page = Playwright::launch().await?.chromium().launch().await?.new_page().await?;
+/// page.route("**/api/health", |route| async move {
+///     let ok = FulfillOptions::builder().status(200).body(b"ok".to_vec()).build();
+///     route.fulfill(ok).await
+/// })
+/// .await?;
+/// page.route("**/*.png", |route| async move { route.abort(None).await }).await?;
+///
+/// page.goto("https://example.com", None).await?;
+/// page.unroute_all(None).await?;
+/// # Ok(())
+/// # }
+/// ```
+impl Page {
+    /// Registers a route handler for network interception.
+    ///
+    /// When a request matches the specified pattern, the handler will be called
+    /// with a Route object that can abort, continue, or fulfill the request.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - URL pattern to match (supports glob patterns like "**/*.png").
+    ///   A relative pattern such as `"/api/*"` resolves against the context's `base_url`.
+    /// * `handler` - Async closure that handles the route
+    ///
+    /// See: <https://playwright.dev/docs/api/class-page#page-route>
+    #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid(), url = %pattern))]
+    pub async fn route<F, Fut>(&self, pattern: &str, handler: F) -> Result<()>
+    where
+        F: Fn(Route) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.route_handlers.add(pattern, handler);
+        self.route_handlers.sync(self.channel()).await
+    }
+
+    /// Fulfills matching requests from an in-process tower `Service`, such as
+    /// an axum `Router` or a tower-http `ServeDir`, with no socket.
+    ///
+    /// Each request whose URL matches `pattern` is rebuilt as an
+    /// `http::Request`, handed to a clone of `service`, and fulfilled with the
+    /// response. The [`route_service`](crate::protocol::route_service) module
+    /// documents what the service sees, the limits of route interception
+    /// compared with a real listener, and how to wait on a wasm frontend.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - URL pattern to match (supports glob patterns like `"https://app.example/**"`)
+    /// * `service` - Any [`RouteService`](crate::protocol::route_service::RouteService):
+    ///   an axum `Router`, a tower-http `ServeDir`, a `tower::service_fn`; cloned per request
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if network interception cannot be enabled. A service
+    /// that fails at request time aborts that request and logs the error; it
+    /// does not surface here.
+    ///
+    /// See: <https://playwright.dev/docs/mock>
+    #[cfg(feature = "route-service")]
+    #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid(), url = %pattern))]
+    pub async fn route_service<S: crate::protocol::route_service::RouteService>(
+        &self,
+        pattern: &str,
+        service: S,
+    ) -> Result<()> {
+        // Captured here, a hop away, so the service's view of the browser
+        // (its engine, its cookie jar) does not depend on walking each
+        // request's object chain.
+        let context = self.context().ok();
+        self.route(pattern, move |route| {
+            crate::protocol::route_service::fulfill_from_service(
+                route,
+                service.clone(),
+                context.clone(),
+            )
+        })
+        .await
+    }
+
+    /// Removes route handler(s) matching the given URL pattern.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - URL pattern to remove handlers for
+    ///
+    /// See: <https://playwright.dev/docs/api/class-page#page-unroute>
+    #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid(), url = %pattern))]
+    pub async fn unroute(&self, pattern: &str) -> Result<()> {
+        self.route_handlers.remove(pattern);
+        self.route_handlers.sync(self.channel()).await
+    }
+
+    /// Removes all registered route handlers.
+    ///
+    /// # Arguments
+    ///
+    /// * `behavior` - What to do about handler invocations still running:
+    ///   [`UnrouteBehavior::Wait`] returns only after they finish,
+    ///   [`UnrouteBehavior::IgnoreErrors`] lets them fail without a log line,
+    ///   and the default (`None`) neither waits nor silences them.
+    ///
+    /// See: <https://playwright.dev/docs/api/class-page#page-unroute-all>
+    #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid()))]
+    pub async fn unroute_all(&self, behavior: Option<UnrouteBehavior>) -> Result<()> {
+        self.route_handlers.remove_all(behavior).await;
+        self.route_handlers.sync(self.channel()).await
+    }
+
+    /// Replays network requests from a HAR file recorded previously.
+    ///
+    /// Requests matching `options.url` (or all requests if omitted) will be
+    /// served from the archive instead of hitting the network.  Unmatched
+    /// requests are either aborted or passed through depending on
+    /// `options.not_found` (`"abort"` is the default).
+    ///
+    /// # Arguments
+    ///
+    /// * `har_path` - Path to the `.har` file on disk
+    /// * `options` - Optional settings (url filter, not_found policy, update mode)
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - `har_path` does not exist or cannot be read by the Playwright server
+    /// - The Playwright server fails to open the archive
+    ///
+    /// See: <https://playwright.dev/docs/api/class-page#page-route-from-har>
+    #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid()))]
+    pub async fn route_from_har(
+        &self,
+        har_path: &str,
+        options: impl Into<Option<RouteFromHarOptions>>,
+    ) -> Result<()> {
+        let options = options.into();
+        let opts = options.unwrap_or_default();
+        let not_found = opts.not_found.unwrap_or_else(|| "abort".to_string());
+        let url_filter = opts.url.clone();
+
+        // Resolve to an absolute path so the Playwright server can open it
+        // regardless of its working directory.
+        let abs_path = std::path::Path::new(har_path).canonicalize().map_err(|e| {
+            Error::InvalidPath(format!(
+                "route_from_har: cannot resolve '{}': {}",
+                har_path, e
+            ))
+        })?;
+        let abs_str = abs_path.to_string_lossy().into_owned();
+
+        // Locate LocalUtils in the connection object registry by type name.
+        // The Playwright server registers it with a guid like "localUtils@1"
+        // so we scan all objects for the one with type_name "LocalUtils".
+        let connection = self.connection();
+        let local_utils = {
+            let all = connection.all_objects_sync();
+            all.into_iter()
+                .find(|o| o.type_name() == "LocalUtils")
+                .and_then(|o| {
+                    o.as_any()
+                        .downcast_ref::<crate::protocol::LocalUtils>()
+                        .cloned()
+                })
+                .ok_or_else(|| {
+                    Error::ProtocolError(
+                        "route_from_har: LocalUtils not found in connection registry".to_string(),
+                    )
+                })?
+        };
+
+        // Open the HAR archive on the server side.
+        let har_id = local_utils.har_open(&abs_str).await?;
+
+        // Determine the URL pattern to intercept.
+        let pattern = url_filter.clone().unwrap_or_else(|| "**/*".to_string());
+
+        // Register a route handler that performs HAR lookup for each request.
+        let har_id_clone = har_id.clone();
+        let local_utils_clone = local_utils.clone();
+        let not_found_clone = not_found.clone();
+
+        self.route(&pattern, move |route| {
+            let har_id = har_id_clone.clone();
+            let local_utils = local_utils_clone.clone();
+            let not_found = not_found_clone.clone();
+            async move {
+                let request = route.request();
+                let req_url = request.url();
+                let req_method = request.method();
+
+                // Build headers array as [{name, value}]
+                let headers = crate::protocol::route_params::header_array(request.header_pairs());
+
+                let lookup = local_utils
+                    .har_lookup(
+                        &har_id,
+                        &req_url,
+                        &req_method,
+                        headers,
+                        None,
+                        request.is_navigation_request(),
+                    )
+                    .await;
+
+                match lookup {
+                    Err(e) => {
+                        tracing::warn!("har_lookup error for {}: {}", req_url, e);
+                        route.continue_(None).await
+                    }
+                    Ok(result) => match result.action.as_str() {
+                        "redirect" => {
+                            let redirect_url = result.redirect_url.unwrap_or_default();
+                            let opts = crate::protocol::ContinueOptions::builder()
+                                .url(redirect_url)
+                                .build();
+                            route.continue_(Some(opts)).await
+                        }
+                        "fulfill" => {
+                            route
+                                .fulfill(Some(crate::protocol::route_params::har_fulfill_options(
+                                    result.status,
+                                    result.body.as_deref(),
+                                    result.headers.as_deref(),
+                                )))
+                                .await
+                        }
+                        _ => {
+                            // "fallback" or "error" or unknown
+                            if not_found == "fallback" {
+                                route.fallback(None).await
+                            } else {
+                                route.abort(None).await
+                            }
+                        }
+                    },
+                }
+            }
+        })
+        .await
+    }
+
+    /// Intercepts WebSocket connections matching the given URL pattern.
+    ///
+    /// When a WebSocket connection from the page matches `url`, the `handler`
+    /// is called with a [`WebSocketRoute`](crate::protocol::WebSocketRoute) object.
+    /// The handler must call [`connect_to_server`](crate::protocol::WebSocketRoute::connect_to_server)
+    /// to forward the connection to the real server, or
+    /// [`close`](crate::protocol::WebSocketRoute::close) to terminate it.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` — URL glob pattern (e.g. `"**"` for every socket, or `"wss://example.com/ws"`).
+    ///   A relative pattern such as `"/ws"` resolves against the context's `base_url`,
+    ///   read as `ws://` or `wss://`.
+    /// * `handler` — Async closure receiving a `WebSocketRoute`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RPC call to enable interception fails.
+    ///
+    /// See: <https://playwright.dev/docs/api/class-page#page-route-web-socket>
+    #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid(), url = %url))]
+    pub async fn route_web_socket<F, Fut>(&self, url: &str, handler: F) -> Result<()>
+    where
+        F: Fn(crate::protocol::WebSocketRoute) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.ws_route_handlers.add(url, handler);
+        self.ws_route_handlers.sync(self.channel()).await
+    }
+
+    /// Handles a route event from the protocol
+    ///
+    /// Called by on_event when a "route" event is received.
+    /// Supports handler chaining via `route.fallback()` — if a handler calls
+    /// `fallback()` instead of `continue_()`, `abort()`, or `fulfill()`, the
+    /// next matching handler in the chain is tried, then the context's
+    /// handlers, before the request is continued.
+    pub(super) async fn on_route_event(&self, route: Route) {
+        if self.route_handlers.run(&route, "Page").await {
+            return;
+        }
+        // Every page handler fell back: the context's handlers come next, and
+        // the context continues the request if they fall back too.
+        match crate::server::connection::downcast_parent::<crate::protocol::BrowserContext>(self) {
+            Some(context) => context.on_route_event(route).await,
+            None => route.continue_unhandled().await,
+        }
+    }
+
+    /// Sets extra HTTP headers that will be sent with every request from this page.
+    ///
+    /// These headers are sent in addition to headers set on the browser context via
+    /// `BrowserContext::set_extra_http_headers()`. Page-level headers take precedence
+    /// over context-level headers when names conflict.
+    ///
+    /// # Arguments
+    ///
+    /// * `headers` - Map of header names to values.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Page has been closed
+    /// - Communication with browser process fails
+    ///
+    /// See: <https://playwright.dev/docs/api/class-page#page-set-extra-http-headers>
+    #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid()))]
+    pub async fn set_extra_http_headers(
+        &self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        // Playwright protocol expects an array of {name, value} objects
+        // This RPC is sent on the Page channel (not the Frame channel)
+        let headers_array = crate::protocol::route_params::header_array(headers);
+        self.channel()
+            .send_no_result(
+                "setExtraHTTPHeaders",
+                serde_json::json!({ "headers": headers_array }),
+            )
+            .await
+    }
+}
+
+/// Options for `page.route_from_har()` and `context.route_from_har()`.
+///
+/// See: <https://playwright.dev/docs/api/class-page#page-route-from-har>
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct RouteFromHarOptions {
+    /// URL glob pattern — only requests matching this pattern are served from
+    /// the HAR file.  All requests are intercepted when omitted.
+    pub url: Option<String>,
+
+    /// Policy for requests not found in the HAR file.
+    ///
+    /// - `"abort"` (default) — terminate the request with a network error.
+    /// - `"fallback"` — pass the request through to the next handler (or network).
+    pub not_found: Option<String>,
+
+    /// When `true`, record new network activity into the HAR file instead of
+    /// replaying existing entries.  Defaults to `false`.
+    pub update: Option<bool>,
+
+    /// Content storage strategy used when `update` is `true`.
+    ///
+    /// - `"embed"` (default) — inline base64-encoded content in the HAR.
+    /// - `"attach"` — store content as separate files alongside the HAR.
+    pub update_content: Option<String>,
+
+    /// Recording detail level used when `update` is `true`.
+    ///
+    /// - `"minimal"` (default) — omit timing, cookies, and security info.
+    /// - `"full"` — record everything.
+    pub update_mode: Option<String>,
+}
+
+impl RouteFromHarOptions {
+    /// Only serve requests matching this URL glob from the HAR.
+    pub fn url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+    /// Behavior for requests not found in the HAR ("abort" or "fallback").
+    pub fn not_found(mut self, not_found: impl Into<String>) -> Self {
+        self.not_found = Some(not_found.into());
+        self
+    }
+    /// Record new entries into the HAR instead of serving from it.
+    pub fn update(mut self, update: bool) -> Self {
+        self.update = Some(update);
+        self
+    }
+
+    /// What to record for response bodies when updating: `"embed"`,
+    /// `"attach"` or `"omit"`.
+    pub fn update_content(mut self, update_content: impl Into<String>) -> Self {
+        self.update_content = Some(update_content.into());
+        self
+    }
+
+    /// How much of each request to record when updating: `"full"` or
+    /// `"minimal"`.
+    pub fn update_mode(mut self, update_mode: impl Into<String>) -> Self {
+        self.update_mode = Some(update_mode.into());
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_from_har_setters_write_their_own_fields() {
+        let opts = RouteFromHarOptions::default()
+            .url("**/api/**")
+            .not_found("abort")
+            .update(true)
+            .update_content("attach")
+            .update_mode("full");
+        assert_eq!(opts.url.as_deref(), Some("**/api/**"));
+        assert_eq!(opts.not_found.as_deref(), Some("abort"));
+        assert_eq!(opts.update, Some(true));
+        assert_eq!(opts.update_content.as_deref(), Some("attach"));
+        assert_eq!(opts.update_mode.as_deref(), Some("full"));
+    }
+}

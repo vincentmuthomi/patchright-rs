@@ -1,0 +1,128 @@
+//! patchright-rs CLI — bootstrap the Patchright driver into a stable
+//! user cache and install browsers.
+//!
+//! The build script assembles the driver into the same user-cache path by
+//! default, so a project that has built the crate already has one. This
+//! binary covers the other cases: a build that skipped or relocated the
+//! download, a cache that was cleaned, or a `cargo install`ed tool whose
+//! build directory is gone. It populates
+//! `dirs::cache_dir()/patchright-rust/<version>/`, which the library's
+//! runtime resolution chain probes after the bundled lookup.
+
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+// Download + assembly logic shared with build.rs (see ADR 0006: the driver
+// is assembled from the npm `patchright-core` tarball + a pinned Node binary).
+include!("../build_support/driver_assembly.rs");
+
+#[derive(Parser)]
+#[command(name = "patchright-rs", version, about = "Install the Patchright driver and its browsers", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Download the Playwright driver to the user cache (if missing) and install browsers.
+    Install {
+        /// Browser names to install (e.g. `chromium firefox webkit`). Omit to install all.
+        browsers: Vec<String>,
+        /// Also install the system libraries the browsers need, which runs
+        /// the package manager under sudo. Opt-in on every platform,
+        /// including Linux, matching `npx playwright install`.
+        #[arg(long)]
+        with_deps: bool,
+        /// Populate the user-cache driver but skip the browser-install step.
+        /// Intended for CI smoke tests and `cargo install` post-install bootstrap.
+        #[arg(long)]
+        driver_only: bool,
+    },
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+
+    match cli.cmd {
+        Cmd::Install {
+            browsers,
+            with_deps,
+            driver_only,
+        } => match run_install(browsers, with_deps, driver_only).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("patchright-rs: {e}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+async fn run_install(
+    browsers: Vec<String>,
+    with_deps: bool,
+    driver_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let version = env!("PLAYWRIGHT_DRIVER_VERSION");
+    let platform = env!("PLAYWRIGHT_DRIVER_PLATFORM");
+
+    let driver_dir = ensure_driver_in_user_cache(version, platform)?;
+    eprintln!("Driver ready at: {}", driver_dir.display());
+
+    if driver_only {
+        return Ok(());
+    }
+
+    // The library's `install_browsers_with_deps` calls `get_driver_executable()`.
+    // `PLAYWRIGHT_DRIVER_PATH` is the highest-precedence source in its chain, so
+    // setting it pins the user-cache driver we just ensured, rather than the
+    // compile-time bundled path (which may not exist post-`cargo install`).
+    // A user who already exported it has pinned their own driver; browsers
+    // must be installed for that one, so leave it alone.
+    // SAFETY: set_var is unsafe in Rust 2024 because env mutation isn't
+    // thread-safe; we run before spawning any worker threads.
+    if std::env::var_os("PLAYWRIGHT_DRIVER_PATH").is_none_or(|value| value.is_empty()) {
+        unsafe {
+            std::env::set_var("PLAYWRIGHT_DRIVER_PATH", &driver_dir);
+        }
+    }
+
+    let browser_refs: Vec<&str> = browsers.iter().map(String::as_str).collect();
+    let browsers_arg: Option<&[&str]> = if browser_refs.is_empty() {
+        None
+    } else {
+        Some(&browser_refs)
+    };
+
+    if with_deps {
+        patchright_rs::install_browsers_with_deps(browsers_arg).await?;
+    } else {
+        patchright_rs::install_browsers(browsers_arg).await?;
+    }
+
+    Ok(())
+}
+
+/// Ensure the Playwright driver exists at
+/// `<cache>/playwright-rust/<version>/playwright-<version>-<platform>/`.
+/// Assembles it from npm + nodejs.org if absent. Returns the driver dir.
+fn ensure_driver_in_user_cache(
+    version: &str,
+    platform: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let cache_root = dirs::cache_dir().ok_or("could not determine user cache directory")?;
+    let driver_dir = cached_driver_dir(&cache_root, version, platform);
+
+    let cli_js = driver_dir.join("package").join("cli.js");
+    if cli_js.exists() {
+        return Ok(driver_dir);
+    }
+
+    eprintln!("Assembling driver {version} (Node {NODE_VERSION}) for {platform}...");
+    assemble_driver(&driver_dir, version, platform)?;
+
+    Ok(driver_dir)
+}

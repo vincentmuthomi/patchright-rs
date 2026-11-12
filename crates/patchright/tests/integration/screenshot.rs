@@ -1,0 +1,486 @@
+use crate::test_server::TestServer;
+use patchright_rs::protocol::Playwright;
+use patchright_rs::protocol::screenshot::{ScreenshotClip, ScreenshotOptions, ScreenshotType};
+
+#[tokio::test]
+async fn test_page_screenshot_returns_bytes() {
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    // Test: Screenshot returns bytes
+    let bytes = page
+        .screenshot(None)
+        .await
+        .expect("Failed to take screenshot");
+
+    // Verify bytes are not empty and look like PNG
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG magic bytes
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_page_screenshot_saves_to_file() {
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let screenshot_path = temp_dir.path().join("playwright_test_screenshot.png");
+
+    // Test: Screenshot saves to file
+    let bytes = page
+        .screenshot_to_file(&screenshot_path, None)
+        .await
+        .expect("Failed to take screenshot");
+
+    // Verify file exists
+    assert!(screenshot_path.exists());
+
+    // Verify bytes were returned
+    assert!(!bytes.is_empty());
+
+    // Verify file content matches returned bytes
+    let file_bytes = std::fs::read(&screenshot_path).expect("Failed to read screenshot file");
+    assert_eq!(bytes, file_bytes);
+
+    // Cleanup
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_page_screenshot_full_page() {
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    // Test: Full page screenshot (captures beyond viewport)
+    use patchright_rs::protocol::ScreenshotOptions;
+    let options = ScreenshotOptions::builder().full_page(true).build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take full page screenshot");
+
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_locator_screenshot() {
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    // Test: Element screenshot via locator
+    let heading = page.locator("h1");
+    let bytes = heading
+        .screenshot(None)
+        .await
+        .expect("Failed to take locator screenshot");
+
+    // Verify bytes are not empty and look like PNG
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG magic bytes
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+// Cross-browser tests
+
+#[tokio::test]
+#[ignore = "launches Firefox; runs in CI's --run-ignored lane"]
+async fn test_screenshot_firefox() {
+    crate::common::init_tracing();
+    let server = TestServer::start().await;
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .firefox()
+        .launch()
+        .await
+        .expect("Failed to launch Firefox");
+    let page = browser.new_page().await.expect("Failed to create page");
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    let bytes = page
+        .screenshot(None)
+        .await
+        .expect("Failed to take screenshot");
+
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+#[ignore = "launches WebKit; runs in CI's --run-ignored lane"]
+async fn test_screenshot_webkit() {
+    crate::common::init_tracing();
+    let server = TestServer::start().await;
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .webkit()
+        .launch()
+        .await
+        .expect("Failed to launch WebKit");
+    let page = browser.new_page().await.expect("Failed to create page");
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    let bytes = page
+        .screenshot(None)
+        .await
+        .expect("Failed to take screenshot");
+
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_screenshot_all_page_options() {
+    // Combined test: All page screenshot options in one browser session
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    // Test 1: JPEG with quality
+    let options = ScreenshotOptions::builder()
+        .screenshot_type(ScreenshotType::Jpeg)
+        .quality(80)
+        .build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take JPEG screenshot");
+    assert!(!bytes.is_empty(), "JPEG screenshot should not be empty");
+    assert_eq!(
+        &bytes[0..2],
+        &[0xFF, 0xD8],
+        "Screenshot should be JPEG format"
+    );
+
+    // Test 1b: WebP with quality (Playwright 1.62). Magic is the RIFF
+    // container plus the "WEBP" form type at offset 8.
+    let options = ScreenshotOptions::builder()
+        .screenshot_type(ScreenshotType::Webp)
+        .quality(70)
+        .build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take WebP screenshot");
+    assert!(!bytes.is_empty(), "WebP screenshot should not be empty");
+    assert_eq!(&bytes[0..4], b"RIFF", "Should be a RIFF container");
+    assert_eq!(&bytes[8..12], b"WEBP", "RIFF form type should be WEBP");
+
+    // Test 2: Explicit PNG format
+    let options = ScreenshotOptions::builder()
+        .screenshot_type(ScreenshotType::Png)
+        .build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take PNG screenshot");
+    assert!(!bytes.is_empty(), "PNG screenshot should not be empty");
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47], "Should be PNG");
+
+    // Test 3: Full page screenshot
+    let options = ScreenshotOptions::builder().full_page(true).build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take full page screenshot");
+    assert!(
+        !bytes.is_empty(),
+        "Full page screenshot should not be empty"
+    );
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47], "Should be PNG");
+
+    // Test 4: Clip region
+    let clip = ScreenshotClip {
+        x: 10.0,
+        y: 10.0,
+        width: 200.0,
+        height: 100.0,
+    };
+    let options = ScreenshotOptions::builder().clip(clip).build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take clip screenshot");
+    assert!(!bytes.is_empty(), "Clip screenshot should not be empty");
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47], "Should be PNG");
+
+    // Test 5: Omit background (transparent PNG)
+    let options = ScreenshotOptions::builder().omit_background(true).build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take transparent screenshot");
+    assert!(
+        !bytes.is_empty(),
+        "Transparent screenshot should not be empty"
+    );
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47], "Should be PNG");
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_screenshot_element_and_locator_with_options() {
+    // Combined test: Element and locator screenshots with options
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    // Test 1: ElementHandle screenshot with JPEG
+    let element = page
+        .query_selector("h1")
+        .await
+        .expect("Failed to query selector")
+        .expect("h1 should exist");
+
+    let options = ScreenshotOptions::builder()
+        .screenshot_type(ScreenshotType::Jpeg)
+        .quality(90)
+        .build();
+    let bytes = element
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take element screenshot");
+    assert!(!bytes.is_empty(), "Element screenshot should not be empty");
+    assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "Should be JPEG");
+
+    // Test 2: Locator screenshot with options
+    let locator = page.locator("h1");
+    let options = ScreenshotOptions::builder()
+        .screenshot_type(ScreenshotType::Jpeg)
+        .quality(85)
+        .build();
+    let bytes = locator
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take locator screenshot");
+    assert!(!bytes.is_empty(), "Locator screenshot should not be empty");
+    assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "Should be JPEG");
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+#[ignore = "launches Firefox; runs in CI's --run-ignored lane"]
+async fn test_screenshot_options_firefox() {
+    crate::common::init_tracing();
+    // Cross-browser test: Firefox
+    let server = TestServer::start().await;
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .firefox()
+        .launch()
+        .await
+        .expect("Failed to launch Firefox");
+    let page = browser.new_page().await.expect("Failed to create page");
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    let options = ScreenshotOptions::builder()
+        .screenshot_type(ScreenshotType::Jpeg)
+        .quality(80)
+        .build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take JPEG screenshot");
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..2], &[0xFF, 0xD8]);
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+#[ignore = "launches WebKit; runs in CI's --run-ignored lane"]
+async fn test_screenshot_options_webkit() {
+    crate::common::init_tracing();
+    // Cross-browser test: WebKit
+    let server = TestServer::start().await;
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .webkit()
+        .launch()
+        .await
+        .expect("Failed to launch WebKit");
+    let page = browser.new_page().await.expect("Failed to create page");
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    let options = ScreenshotOptions::builder()
+        .screenshot_type(ScreenshotType::Jpeg)
+        .quality(80)
+        .build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("Failed to take JPEG screenshot");
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..2], &[0xFF, 0xD8]);
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_screenshot_new_options_accepted() {
+    use patchright_rs::protocol::screenshot::{Animations, Caret, Scale};
+
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    // Exercise the options added for parity: animations, caret, scale, style.
+    // The driver rejects unknown params, so a successful capture confirms the
+    // protocol param names are correct.
+    let options = ScreenshotOptions::builder()
+        .animations(Animations::Disabled)
+        .caret(Caret::Hide)
+        .scale(Scale::Css)
+        .style("* { animation: none !important; }")
+        .build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("screenshot with animations/caret/scale/style options");
+
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG magic bytes
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn test_screenshot_mask_accepted() {
+    let server = TestServer::start().await;
+    let (_pw, browser, page) = crate::common::setup().await;
+
+    page.goto(&format!("{}/locators.html", server.url()), None)
+        .await
+        .expect("Failed to navigate");
+
+    // Mask locators serialize to `{ frame, selector }` channel refs; a
+    // successful capture confirms that shape (and maskColor) is accepted.
+    let masked = page.locator("h1");
+    let options = ScreenshotOptions::builder()
+        .mask(vec![masked])
+        .mask_color("#FF00FF")
+        .build();
+    let bytes = page
+        .screenshot(Some(options))
+        .await
+        .expect("screenshot with mask + mask_color");
+
+    assert!(!bytes.is_empty());
+    assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]); // PNG magic bytes
+
+    browser.close().await.expect("Failed to close browser");
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn a_locator_screenshot_waits_for_its_element_up_to_the_timeout() {
+    let (_pw, browser, page) = crate::common::setup().await;
+    page.set_default_timeout(5_000.0).await;
+    page.set_content(
+        "<div>hello</div><script>setTimeout(() => {\
+           const late = document.createElement('div');\
+           late.id = 'late';\
+           late.textContent = 'late';\
+           document.body.append(late);\
+         }, 200)</script>",
+        None,
+    )
+    .await
+    .expect("set_content");
+
+    let bytes = page
+        .locator("#late")
+        .screenshot(None)
+        .await
+        .expect("waits for an element that appears after the call");
+    assert!(!bytes.is_empty());
+
+    let started = std::time::Instant::now();
+    let err = page
+        .locator("#missing")
+        .screenshot(
+            patchright_rs::protocol::ScreenshotOptions::builder()
+                .timeout(500.0)
+                .build(),
+        )
+        .await
+        .expect_err("an element that never appears");
+    assert!(
+        matches!(err, patchright_rs::Error::Timeout(_)),
+        "times out rather than failing at once: {err:?}"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(400),
+        "{:?}",
+        started.elapsed()
+    );
+
+    browser.close().await.expect("close");
+}

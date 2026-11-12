@@ -1,0 +1,87 @@
+// Single integration test binary
+//
+// All async integration tests are consolidated into this binary to reduce
+// compilation time (1 binary instead of 53). Nextest still runs each
+// #[tokio::test] function in parallel.
+//
+// Sync-only tests (no browser needed) remain as separate binaries in tests/.
+
+// The crate's clippy.toml steers its own spawns through `task::spawn`,
+// which tests cannot reach; a bare `tokio::spawn` is right here.
+#![allow(clippy::disallowed_methods)]
+
+mod common;
+mod test_server;
+
+mod actions;
+mod api_request;
+mod aria_snapshot;
+mod assertions;
+mod back_references;
+mod browser;
+mod browser_context;
+mod browser_orphans;
+mod cdp_tracing;
+mod checkbox;
+#[cfg(feature = "cli")]
+mod cli_bin;
+mod click_options;
+mod close_options;
+mod connection;
+mod console_message;
+mod context_events;
+mod context_route;
+mod context_runtime_setters;
+mod credentials;
+mod debugger;
+mod downloads_dialogs;
+mod element_handle;
+mod evaluate;
+mod evaluate_callback;
+mod expect_event;
+mod expose_binding;
+mod fake_file_system;
+mod file_chooser;
+mod frame_api;
+mod frame_locator;
+mod initialization;
+mod install_browsers;
+mod js_handle;
+mod keyboard_mouse;
+mod launch_context;
+mod locator;
+mod navigation;
+mod network_route;
+mod page;
+mod page_assertions;
+mod page_event_network;
+mod page_events;
+mod page_new_methods;
+mod page_properties;
+mod pause;
+mod playwright_launch;
+mod request;
+mod request_response_complete;
+mod response;
+mod route_advanced;
+mod route_fallback_unroute;
+mod route_fetch;
+#[cfg(feature = "route-service")]
+mod route_service;
+mod screencast;
+mod screenshot;
+mod scripts_styles;
+mod select_upload;
+mod selectors;
+mod stability;
+mod storage_state;
+mod tracing_emission;
+mod transport;
+mod unroute_behavior;
+mod wait_for_function;
+mod web_error;
+mod web_storage;
+mod webmcp;
+mod websocket;
+mod windows_cleanup;
+mod worker;

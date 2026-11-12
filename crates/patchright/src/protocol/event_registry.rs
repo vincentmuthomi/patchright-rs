@@ -1,0 +1,436 @@
+//! One home for the "list of handlers plus list of one-shot waiters" pattern
+//! that every page- and context-level event repeats.
+//!
+//! Before this existed each event carried two `Arc<Mutex<Vec<_>>>` fields, two
+//! type aliases, a hand-rolled emptiness check to drive subscription, and its
+//! own dispatch loop. The loops had drifted apart: 17 of 18 ran handlers before
+//! waking a waiter and one did the reverse, and every one of the 19 waiter
+//! drains used `Vec::pop` — last-in-first-out — while seven of them carried a
+//! comment promising FIFO. Collapsing them here is mostly about having one
+//! answer to those questions rather than about the line count.
+
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+use crate::error::Result;
+use tokio::sync::oneshot;
+
+/// A boxed future returned by an event handler.
+pub(crate) type HandlerFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+/// An async event handler. Cloned out of the registry before dispatch, so a
+/// handler that registers another handler cannot deadlock on the lock.
+pub(crate) type Handler<T> = Arc<dyn Fn(T) -> HandlerFuture + Send + Sync>;
+
+/// Handlers and one-shot waiters for a single event.
+pub(crate) struct EventRegistry<T> {
+    /// Event name, used only for the handler-error log line.
+    name: &'static str,
+    handlers: Mutex<Vec<Handler<T>>>,
+    waiters: Mutex<VecDeque<tokio::sync::oneshot::Sender<T>>>,
+}
+
+impl<T> EventRegistry<T> {
+    pub(crate) fn new(name: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            handlers: Mutex::new(Vec::new()),
+            waiters: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    /// Whether nobody is listening.
+    ///
+    /// The server only pushes an event once we subscribe, and callers use this
+    /// to decide whether registering makes them the first listener. It has to
+    /// consider waiters as well as handlers: an `expect_*` call with no
+    /// handlers registered still needs the subscription.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.handlers.lock().unwrap().is_empty() && self.waiters.lock().unwrap().is_empty()
+    }
+
+    pub(crate) fn add_handler(&self, handler: Handler<T>) {
+        self.handlers.lock().unwrap().push(handler);
+    }
+
+    /// Enqueue a one-shot waiter and hand back the receiver.
+    pub(crate) fn wait(&self) -> tokio::sync::oneshot::Receiver<T> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiters.lock().unwrap().push_back(tx);
+        rx
+    }
+
+    /// The protocol event name, so callers driving `update_subscription` do not
+    /// restate the string at every registration site.
+    pub(crate) fn name(&self) -> &'static str {
+        self.name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handler_count(&self) -> usize {
+        self.handlers.lock().unwrap().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters.lock().unwrap().len()
+    }
+}
+
+impl<T: Clone> EventRegistry<T> {
+    /// Deliver one event: every handler, then the longest-waiting waiter.
+    ///
+    /// Handlers run first because 17 of the 18 hand-written dispatchers did,
+    /// and because a waiter's continuation may observe state a handler set —
+    /// an `expect_*` that resumes after the handlers cannot race their side
+    /// effects. The cost, accepted deliberately: a slow handler delays the
+    /// waiter's wake-up, and a hung one blocks it. That coupling was already
+    /// the shipped behavior for those 17 events.
+    ///
+    /// Waiters are served oldest-first *per dispatch*, which is what their doc
+    /// comments always claimed even while the code popped the newest. This is
+    /// not a cross-event ordering guarantee: callers dispatch each event from
+    /// its own spawned task, so two in-flight dispatches may reach the queue
+    /// in either order regardless of which event the server emitted first.
+    ///
+    /// A handler that returns `Err` is logged and does not stop the others: one
+    /// bad observer must not swallow an event for everyone else.
+    ///
+    /// Returns whether a handler or a live waiter received the event, which is
+    /// what upstream's `emit` reports and what decides whether an unheard
+    /// dialog is answered on the caller's behalf.
+    pub(crate) async fn dispatch(&self, value: T) -> bool {
+        let handlers = self.handlers.lock().unwrap().clone();
+        let handled = !handlers.is_empty();
+        for handler in handlers {
+            if let Err(e) = handler(value.clone()).await {
+                tracing::warn!("{} handler error: {}", self.name, e);
+            }
+        }
+        self.notify_one_waiter(value) || handled
+    }
+
+    /// Deliver one event to every handler and *every* queued waiter.
+    ///
+    /// For one-time state transitions — close, load, crash — the event will
+    /// not recur, so every queued `expect_*` must resolve on it; serving only
+    /// the oldest (as [`dispatch`](Self::dispatch) does) would leave the rest
+    /// hanging until their timeouts. The hand-written dispatchers for those
+    /// three events always drained the whole queue.
+    pub(crate) async fn dispatch_all(&self, value: T) {
+        let handlers = self.handlers.lock().unwrap().clone();
+        for handler in handlers {
+            if let Err(e) = handler(value.clone()).await {
+                tracing::warn!("{} handler error: {}", self.name, e);
+            }
+        }
+        let drained: Vec<_> = self.waiters.lock().unwrap().drain(..).collect();
+        for tx in drained {
+            let _ = tx.send(value.clone());
+        }
+    }
+
+    /// Hand the value to the oldest waiter whose receiver is still alive.
+    ///
+    /// Skipping dead receivers matters: an `expect_*` that timed out or was
+    /// cancelled leaves a sender whose receiver is gone, and the old
+    /// pop-then-send would consume the event on it and starve the waiter behind
+    /// it. Returns whether a waiter took the value.
+    fn notify_one_waiter(&self, value: T) -> bool {
+        let mut waiters = self.waiters.lock().unwrap();
+        while let Some(tx) = waiters.pop_front() {
+            match tx.send(value.clone()) {
+                Ok(()) => return true,
+                Err(_) => continue,
+            }
+        }
+        false
+    }
+}
+
+/// Bridges a registry waiter into an `EventValue` waiter. The registry
+/// receiver is dropped as soon as the caller's receiver closes, so a waiter
+/// that timed out cannot swallow the next event owed to a live one.
+pub(crate) fn bridge<T: Send + 'static>(
+    inner_rx: oneshot::Receiver<T>,
+    wrap: impl FnOnce(T) -> crate::protocol::EventValue + Send + 'static,
+) -> oneshot::Receiver<crate::protocol::EventValue> {
+    let (mut tx, rx) = oneshot::channel();
+    crate::task::spawn(async move {
+        tokio::select! {
+            v = inner_rx => {
+                if let Ok(v) = v {
+                    _ = tx.send(wrap(v));
+                }
+            }
+            () = tx.closed() => {}
+        }
+    });
+    rx
+}
+
+/// Hands `value` to the oldest waiter whose caller is still listening,
+/// discarding the ones that have gone. Returns whether anyone received it.
+pub(crate) fn deliver_to_oldest_live<T>(
+    waiters: &mut Vec<oneshot::Sender<T>>,
+    mut value: T,
+) -> bool {
+    while !waiters.is_empty() {
+        match waiters.remove(0).send(value) {
+            Ok(()) => return true,
+            Err(unsent) => value = unsent,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::EventValue;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn counting_handler(hits: Arc<AtomicUsize>) -> Handler<u32> {
+        Arc::new(move |_| {
+            let hits = hits.clone();
+            Box::pin(async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        })
+    }
+
+    fn failing_handler() -> Handler<u32> {
+        Arc::new(|_| Box::pin(async { Err(crate::error::Error::ProtocolError("nope".into())) }))
+    }
+
+    // Dispatch wakes waiters before it returns, so the value is already in the
+    // channel. Awaiting the receiver instead would hang forever when dispatch
+    // is broken, and a hang is not a failure: cargo-mutants reports it as a
+    // timeout rather than a caught mutant.
+    fn already_received<T>(mut rx: tokio::sync::oneshot::Receiver<T>) -> T {
+        rx.try_recv()
+            .expect("the waiter must be woken before dispatch returns")
+    }
+
+    #[test]
+    fn the_name_survives_construction() {
+        // Load-bearing, not cosmetic: subscribe_if_idle passes this to
+        // update_subscription, so a corrupted name subscribes to the wrong
+        // server event and the real one never arrives.
+        assert_eq!(EventRegistry::<u32>::new("console").name(), "console");
+    }
+
+    #[tokio::test]
+    async fn idle_until_someone_registers() {
+        let reg = EventRegistry::<u32>::new("test");
+        assert!(reg.is_idle());
+
+        let _rx = reg.wait();
+        assert!(
+            !reg.is_idle(),
+            "a waiter alone must still drive subscription"
+        );
+
+        let reg2 = EventRegistry::<u32>::new("test");
+        reg2.add_handler(counting_handler(Arc::new(AtomicUsize::new(0))));
+        assert!(!reg2.is_idle());
+    }
+
+    #[tokio::test]
+    async fn every_handler_sees_every_event() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let reg = EventRegistry::<u32>::new("test");
+        reg.add_handler(counting_handler(hits.clone()));
+        reg.add_handler(counting_handler(hits.clone()));
+
+        reg.dispatch(1).await;
+        reg.dispatch(2).await;
+
+        assert_eq!(hits.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            reg.handler_count(),
+            2,
+            "handlers are retained across events"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_handler_does_not_starve_the_others() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let reg = EventRegistry::<u32>::new("test");
+        reg.add_handler(failing_handler());
+        reg.add_handler(counting_handler(hits.clone()));
+
+        reg.dispatch(7).await;
+
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn waiters_are_served_oldest_first() {
+        let reg = EventRegistry::<u32>::new("test");
+        let first = reg.wait();
+        let second = reg.wait();
+
+        reg.dispatch(10).await;
+        reg.dispatch(20).await;
+
+        assert_eq!(
+            already_received(first),
+            10,
+            "the earliest waiter gets the earliest event"
+        );
+        assert_eq!(already_received(second), 20);
+    }
+
+    #[tokio::test]
+    async fn a_waiter_is_one_shot() {
+        let reg = EventRegistry::<u32>::new("test");
+        let rx = reg.wait();
+
+        reg.dispatch(1).await;
+        assert_eq!(already_received(rx), 1);
+        assert_eq!(reg.waiter_count(), 0);
+
+        // Nothing left to notify, and dispatching again must not panic.
+        reg.dispatch(2).await;
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_waiter_does_not_swallow_the_event() {
+        let reg = EventRegistry::<u32>::new("test");
+        let abandoned = reg.wait();
+        let live = reg.wait();
+        drop(abandoned);
+
+        reg.dispatch(42).await;
+
+        assert_eq!(
+            already_received(live),
+            42,
+            "a cancelled expect_* must not consume the event for the waiter behind it"
+        );
+    }
+
+    #[tokio::test]
+    async fn handlers_run_before_the_waiter_is_woken() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let reg = EventRegistry::<u32>::new("test");
+        let recorded = order.clone();
+        reg.add_handler(Arc::new(move |_| {
+            let recorded = recorded.clone();
+            Box::pin(async move {
+                recorded.lock().unwrap().push("handler");
+                Ok(())
+            })
+        }));
+        let rx = reg.wait();
+
+        reg.dispatch(1).await;
+        order.lock().unwrap().push("dispatch returned");
+        already_received(rx);
+
+        assert_eq!(*order.lock().unwrap(), vec!["handler", "dispatch returned"]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_all_resolves_every_waiter() {
+        let reg = EventRegistry::<u32>::new("test");
+        let first = reg.wait();
+        let second = reg.wait();
+
+        reg.dispatch_all(9).await;
+
+        assert_eq!(already_received(first), 9);
+        assert_eq!(
+            already_received(second),
+            9,
+            "a one-time transition must wake every queued expect, not just the oldest"
+        );
+        assert_eq!(reg.waiter_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_with_no_listeners_is_a_no_op() {
+        let reg = EventRegistry::<u32>::new("test");
+        assert!(!reg.dispatch(1).await, "nobody heard it");
+        assert!(reg.is_idle());
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_an_event_a_handler_heard() {
+        let reg = EventRegistry::<u32>::new("test");
+        reg.add_handler(failing_handler());
+        assert!(
+            reg.dispatch(1).await,
+            "a handler heard it, even one that failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_reports_an_event_a_waiter_took() {
+        let reg = EventRegistry::<u32>::new("test");
+        let rx = reg.wait();
+        assert!(reg.dispatch(1).await);
+        already_received(rx);
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_waiter_does_not_count_as_hearing_the_event() {
+        let reg = EventRegistry::<u32>::new("test");
+        drop(reg.wait());
+        assert!(!reg.dispatch(1).await);
+    }
+
+    #[test]
+    fn oldest_live_waiter_takes_the_value_and_the_rest_stay() {
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
+        let mut waiters = vec![tx1, tx2];
+        assert!(deliver_to_oldest_live(&mut waiters, 1));
+        assert_eq!(rx1.try_recv(), Ok(1));
+        assert!(rx2.try_recv().is_err());
+        assert_eq!(waiters.len(), 1);
+    }
+
+    #[test]
+    fn a_waiter_whose_caller_left_is_skipped_and_dropped() {
+        let (dead, _) = oneshot::channel::<u8>();
+        let (live, mut rx) = oneshot::channel();
+        let mut waiters = vec![dead, live];
+        assert!(deliver_to_oldest_live(&mut waiters, 7));
+        assert_eq!(rx.try_recv(), Ok(7));
+        assert!(waiters.is_empty());
+    }
+
+    #[test]
+    fn no_live_waiter_reports_undelivered_and_clears_the_dead() {
+        let (dead, _) = oneshot::channel::<u8>();
+        let mut waiters = vec![dead];
+        assert!(!deliver_to_oldest_live(&mut waiters, 7));
+        assert!(waiters.is_empty());
+        assert!(!deliver_to_oldest_live(&mut waiters, 8));
+    }
+
+    #[tokio::test]
+    async fn bridge_wraps_the_value_for_the_caller() {
+        let (tx, inner_rx) = oneshot::channel();
+        let rx = bridge(inner_rx, |()| EventValue::Close);
+        tx.send(()).unwrap();
+        assert!(matches!(rx.await, Ok(EventValue::Close)));
+    }
+
+    #[tokio::test]
+    async fn bridge_releases_the_registry_waiter_when_the_caller_leaves() {
+        let (mut tx, inner_rx) = oneshot::channel::<()>();
+        let rx = bridge(inner_rx, |()| EventValue::Close);
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(1), tx.closed())
+            .await
+            .expect("the registry receiver must be dropped once the caller is gone");
+    }
+}

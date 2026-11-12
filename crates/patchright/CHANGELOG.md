@@ -1,0 +1,1039 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- **Close options: `Page::close_with_options`, `BrowserContext::close_with_options`, and `Browser::close_with_options`.** Each takes a `reason` that operations the close interrupts report in their error, as Playwright's other clients allow. `PageCloseOptions::run_before_unload` runs the page's `beforeunload` handlers instead of closing it outright: the page may raise a `beforeunload` dialog and stays open if that dialog is dismissed, so the call returns before the page has closed. `close()` is unchanged on all three.
+- **`connect_over_cdp()` takes a browser channel name.** With the 1.65.0 driver, a Chromium channel name such as `"chrome"`, `"chrome-beta"`, or `"msedge"` in place of an endpoint URL connects to that browser with remote debugging enabled in its default user data directory. A channel with no default directory on the current platform fails with the driver's "not supported" error. The driver resolves the name, so the method is unchanged.
+
+### Changed
+
+- **BREAKING: `Request::url()` and `Request::method()` return `String`.** A route handler's `fallback()` or `continue_()` now changes what they return (see Fixed), and a value that can change cannot be borrowed. Comparisons and `str` methods still compile; code that keeps the `&str` (`let url: &str = request.url();`) needs `&request.url()` or an owned binding. `headers()`, `post_data()`, `post_data_buffer()`, `post_data_json()`, `headers_array()`, `all_headers()`, and `header_value()` report the overrides as well, and keep their signatures. Reported in [#170](https://github.com/padamson/playwright-rust/issues/170).
+- **BREAKING: a route handler makes one decision.** Once a handler calls `route.fallback()`, a second `fallback()` and any `fulfill()`, `continue_()`, or `abort()` from that handler fail with "Route is already handled!", as in Playwright's other clients. They used to succeed, so a handler that fell back could still answer the request itself, and the next handler never saw it. A later handler answers a request an earlier one fell back on as before, and `fetch()` still allows either decision after it. A handler that returns the refusal as its error has its request aborted.
+- **BREAKING: Bundled Playwright driver is now 1.65.0** (was 1.64.0). Browser builds: Chromium 158, Firefox 159, WebKit 27.2. Four upstream behavior changes reach Rust callers. Actions (`click()`, `dblclick()`, `tap()`, `check()`, `uncheck()`, `set_checked()`, `fill()`, `clear()`, `select_option()`; not `hover()`) now wait for the element to be not inert, so an action on an element with the `inert` attribute, or inside one, times out if it stays inert. `cookies()` on a browser context or an `APIRequestContext` matches URLs as RFC 6265 does: a host-only cookie no longer comes back for a subdomain, a `Path=/api` cookie for `/apiv2`, or a `Path=/foo/` cookie for `/foo`. The credentials in `ProxySettings` answer only proxy challenges and are no longer sent to websites (use `http_credentials` to authenticate on a site). Text the browser does not render, such as text not assigned to a slot or text directly inside a closed `<details>`, is no longer part of accessible names, which changes `get_by_role()` with a name, `aria_snapshot()`, and `to_match_aria_snapshot()`; an aria snapshot can also leave out a name that repeats its printed descendants, such as a heading that contains a link. The bump also carries 1.64.1's fix for a Chromium regression that reached any page or context with a route registered: a credentialed cross-origin `fetch()` that needed a preflight and was redirected failed with "Failed to fetch". The protocol spec was diffed across both tags: the one change is an optional `supportsLoneSurrogates` parameter to `initialize`, which this crate does not send, so the driver still replaces a lone surrogate in a string with U+FFFD, as it did before.
+- **The bundled Node runtime is 26.13.0** (was 24.21.0), the Node 26 LTS release playwright-python builds the 1.65 driver with. The first build after upgrading assembles the new driver into the cache; directories for older driver versions are left in place, and every `<version>` directory other than `1.65.0` under `playwright-rust/` in the user cache directory (`~/Library/Caches` on macOS, `~/.cache` on Linux) can be deleted.
+- **BREAKING (`trace` feature): `playwright_rs::trace::open` refuses a trace whose zip headers disagree**, and `playwright_rs::trace::TraceError` is now `#[non_exhaustive]` with a new `InconsistentArchive` variant. This comes from playwright-rs-trace 0.3.0, whose changelog has the details.
+- **BREAKING: `to_be_focused()` is strict, and the server retries it.** It now sends Playwright's `to.be.focused` expectation, as the other clients do, so a locator that matches several elements fails with a strict mode violation (`Error::AssertionFailed`) instead of checking the first match. The other state assertions (`to_be_visible()`, `to_be_enabled()`, and the rest) were already strict. `with_poll_interval()` no longer affects it.
+- **MSRV is now Rust 1.95** (was 1.88). parking_lot 0.13, with its lock_api 0.5 and parking_lot_core 0.10, requires it.
+- **playwright-rs no longer turns on base64's `simd-unsafe` feature.** Every encode and decode the crate makes goes through base64's scalar engine, which never calls the SIMD code, so a build now leaves out the only unsafe code in that crate. A project that enables the feature itself still gets it.
+
+### Deprecated
+
+- **`Page::trigger_dialog_event`.** It was public only so the browser context could forward dialogs to the page, no other Playwright binding has it, and the crate no longer uses it. Calling it hands a dialog to the page's handlers without answering one that none of them hear. Register a handler with `on_dialog` instead. It will be removed in a later breaking release.
+
+### Fixed
+
+- **Firefox launches on macOS 27 on a machine where a real Firefox has been installed.** The Firefox 157 in the 1.64 driver exited at once with "Could not find profile folder" unless the terminal or editor running it had Full Disk Access, because it read the real Firefox's `~/Library/Application Support/Firefox`, which macOS 27 protects. The Firefox 159 in the 1.65.0 driver does not. Reported in [#182](https://github.com/padamson/playwright-rust/issues/182).
+- **`is_focused()` and `to_be_focused()` accept any Playwright selector.** They passed the locator's selector to the page's `document.querySelectorAll`, so only plain CSS worked: a role locator (`get_by_role`), a text or label locator, or any `nth()`, `first()` or `last()` failed with "is not a valid selector". The selector is now resolved by Playwright, as every other locator check's is. A selector that matches nothing is still not focused, so `to_be_focused()` keeps waiting for the element to appear. Reported in [#180](https://github.com/padamson/playwright-rust/issues/180).
+- **The locator assertions are documented on docs.rs, and `Expectation` can be named.** `expect()` returned `Expectation`, a type with no public path, so rustdoc gave it no page and `to_be_visible()`, `to_have_text()`, and the other locator assertions appeared nowhere in the published docs. Code could not write the type either, for example as a helper's return type. It is now exported as `playwright_rs::Expectation`.
+- **`Request::post_data_json()` reads a form body.** A body sent as `application/x-www-form-urlencoded` is now an object of its fields, each value a string and blank values kept, as in Playwright's other clients. It used to be parsed as JSON and fail. An empty body now returns `None`, as it does upstream, where it returned an error.
+- **`to_have_css_pseudo()` takes the bare pseudo-element name in every browser.** `"before"` and `"after"`, the names Playwright's other clients take, read the element's own style in Firefox and WebKit, so the assertion compared the wrong value; only `"::before"` worked there. Both spellings now work in all three.
+- **A dialog nobody handles no longer blocks the page.** With no `dialog` handler on the page or its context, `alert()`, `confirm()`, and `prompt()` dialogs are now dismissed and a `beforeunload` dialog accepted, as Playwright's other clients do. Before, the dialog stayed open, so a stray `confirm()` hung the `evaluate` that raised it and a page with a `beforeunload` listener could not be navigated away from. Registering a handler still leaves the answer to it. Reported in [#167](https://github.com/padamson/playwright-rust/issues/167).
+- **`route.fallback()` now passes the request on instead of sending it.** It sent the request to the network on every call, so a later handler's `fulfill()`, `continue_()`, or `abort()` failed with "Route is already handled!", a page route that fell back never reached the context's routes, and a later handler could not add to the overrides. A fallback now records its overrides and hands the request to the next matching handler, the page's and then the context's, and the request is continued once when none is left, with every fallback's overrides applied (a later one wins field by field). `continue_()` applies them too. A later handler sees the request as the fallbacks left it: `route.request()` reports the overridden URL, method, headers, and post data, and each handler, the page's and then the context's, is matched against the overridden URL, so a fallback that rewrites the URL changes which handlers run after it. Reported in [#167](https://github.com/padamson/playwright-rust/issues/167) and [#170](https://github.com/padamson/playwright-rust/issues/170).
+- **`route.fetch()` sends the request's headers and post data unless told otherwise.** It defaulted only the URL and method, so a fetch of an intercepted POST went out with no body and none of the browser's headers. All four now default to the request's, with any fallback overrides applied, as in playwright-python. Reported in [#170](https://github.com/padamson/playwright-rust/issues/170).
+- **A route handler that fails after `route.fetch()` no longer leaves its request hanging.** A handler that returns an error before it fulfills, continues, or aborts its request has the request aborted, but a `fetch()` counted as one of those, so the page waited until its navigation timed out. A handler that fetches and returns without answering or falling back still keeps the route: no later handler runs and the request waits, as before.
+- **Route and WebSocket route patterns match as the driver matches them.** A pattern is now resolved against the context's `base_url` before it is matched, so a relative pattern such as `"/api/*"` in `route()` or `"/ws"` in `route_web_socket()` runs its handler; it used to be matched as written and never ran, which left an intercepted request to the network and a routed WebSocket hanging. The resolution also normalizes the pattern as a URL, as Playwright's other clients do: a WebSocket pattern for a bare host (`"ws://localhost:3000"`) matches its socket, a default port or a space in the pattern matches the request URL that omits or encodes it, and the scheme and host match without regard to case. One consequence: `"ws://**"` resolves to `"ws://**/"` and matches only a socket whose URL ends in `/`, so the `route_web_socket` docs that suggested it for every socket now suggest `"**"`.
+- **`wait_for_url()` and `to_have_url()` resolve a relative URL against the context's `base_url`.** With a `base_url` set, `page.wait_for_url("/done")` waited until it timed out and `expect_page(&page).to_have_url("/done")` failed, because both compared the URL as written; they now resolve it first and normalize it as a URL, as Playwright's other clients do, so `"http://localhost:3000"` also matches the page's `http://localhost:3000/`. `wait_for_url()` now reads every string as a glob, where it used glob matching only for a pattern containing `*`: `{a,b}` alternation and `\` escapes apply to any pattern, and a pattern without glob syntax still matches that URL exactly. `to_have_url()` stays an exact comparison after resolving, as upstream's is.
+- **A route handler can fall back after `route.fetch()`.** `fallback()` failed with "Route is already handled!" once the handler had fetched, so a handler could not inspect the real response and then leave the request to the next one. It now passes the request on, as in playwright-python.
+
+### Security
+
+- **Bumped transitive `rustls-webpki` 0.103.15 → 0.103.16 ([RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382)) and `webpki-roots` 1.0.6 → 1.0.10 ([RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381))** in the workspace lockfile and in the excluded site-e2e and fuzz lockfiles. Both let a certificate chain through emSign intermediates whose private keys are now public: the bundled roots included `emSign ECC Root CA - G3`, and verification did not reject the distrusted intermediates. `webpki-roots` is the trust store for the build script's driver download and, with the `rustls-tls-webpki-roots` feature, for `connect()` over `wss://`; `rustls-webpki` verifies every rustls connection. 1.0.10 also drops 19 other roots Mozilla no longer trusts; the driver still downloads from `nodejs.org` and `registry.npmjs.org` with it. A downstream project picks up the fix with `cargo update -p rustls-webpki -p webpki-roots@1`.
+- **The driver download is checked against pinned digests.** The build script, and `playwright-rs install` with the `cli` feature, fetch the `playwright-core` tarball from `registry.npmjs.org` and a Node.js archive from `nodejs.org`, and relied on TLS alone to get what was published. Each is now compared with a digest the crate pins (npm's `dist.integrity` and the release's `SHASUMS256.txt`) before anything is unpacked. One that differs fails the build with a "does not match its pinned digest" error naming the URL and both digests, and `playwright-rs install` exits with the same error. A download that fails for another reason, such as no network, still warns and builds without a driver, as before.
+
+## [0.20.1] - 2026-10-16
+
+### Fixed
+
+- **The crate installs again: `zip` moves from 8 to 9.** The `zip` maintainers yanked every 8.x release, and the build script depends on `zip` to unpack the Windows Node archive, so a project without a lockfile could no longer resolve 0.20.0 at all. With the `trace` feature, `playwright_rs::trace::TraceError::Zip` now wraps `zip` 9's `ZipError`, through playwright-rs-trace 0.2.2.
+
+### Security
+
+- **Bumped transitive `rustls` 0.23.45 → 0.23.46 ([RUSTSEC-2026-0346](https://rustsec.org/advisories/RUSTSEC-2026-0346), [RUSTSEC-2026-0347](https://rustsec.org/advisories/RUSTSEC-2026-0347), [RUSTSEC-2026-0348](https://rustsec.org/advisories/RUSTSEC-2026-0348), [RUSTSEC-2026-0349](https://rustsec.org/advisories/RUSTSEC-2026-0349))** in the workspace lockfile and in the excluded site-e2e and fuzz lockfiles. The one that can reach this crate is RUSTSEC-2026-0349: a network attacker could answer one handshake with an unauthenticated ServerHello and push later connections to the same server name down to classical key exchange, losing post-quantum confidentiality but not authentication. The other three need a custom `ClientSessionStore`, `EchMode::Enable`, or rustls's `brotli` feature, none of which this crate uses. rustls reaches this crate through `ureq` (driver download) and the `rustls-tls` features. A downstream project picks up the fix with `cargo update -p rustls`.
+
+## [0.20.0] - 2026-10-11
+
+### Added
+
+- **WebMCP: `Page::webmcp` and `Frame::webmcp`**, which list the tools a page registers through the experimental WebMCP browser API (`tools`, as `WebMCPTool`s with their input schema and hints) and call them (`call_tool`, with the result deserialized as any serde type), so a test can exercise them as an agent would. Chromium needs `--enable-features=WebMCP` in `args` and Firefox two `dom.modelcontext` preferences; WebKit does not support it. The `webmcp_agent` example shows the agent loop it makes possible: hand a page's tools to a model (their name, description, and input schema are the fields a model's tool list takes), call the one it picks, and fall back to an `ai` snapshot and `get_by_ref` on a page that publishes none.
+- **`Locator::within`**, which scopes a locator to each element another locator matches: `cells.nth(1).within(&rows)` is the second cell of every row, where `rows.locator(..)` would number the cells across the whole table.
+- **`Page::get_by_ref`**, which finds the element an `ai`-mode aria snapshot names by its ref (`button "Save" [ref=e2]`), so an agent can act on what a snapshot reported.
+- **`Page::content_with_options` and `Frame::content_with_options`, taking `ContentOptions::include_shadow`**, which serializes open shadow roots as declarative shadow DOM (`<template shadowrootmode="open">`) where `content()` leaves them out. Closed shadow roots are never included. `content()` itself is unchanged.
+- **Screen emulation: `BrowserContextOptions::screen` and `DeviceDescriptor::screen`.** The screen size `window.screen` and media queries report is separate from the viewport, and Playwright's context options and device descriptors both carry it, but this crate had neither: `devices()` dropped the screen 115 of its descriptors define, and a context could not set one. Pass a descriptor's `screen` with its `viewport` to emulate the device fully.
+- **Cookies on `APIRequestContext`: `add_cookies`, `cookies`, and `clear_cookies`**, mirroring `BrowserContext`. On the request context a `BrowserContext` exposes through `request()`, they act on the browser context's own jar.
+- **Regular-expression cookie filters: `ClearCookiesOptions::name_regex`, `domain_regex`, and `path_regex`**, each taking a JavaScript regex source and flags, for both `clear_cookies` methods. Each filter is a string or a regex, whichever was set last. The string filters are unchanged.
+- **`Cookie::url`**, so a cookie being added can name the URL it applies to and let the driver derive its domain, path, and `secure` flag, as every other binding allows. An empty `domain` or `path` is no longer sent, which is what lets a URL cookie through the driver's check that a cookie has a URL or a domain and path, not both.
+- **Frame rate and action styling for recordings.** `RecordVideo::fps` and `ScreencastStartOptions::fps` set the frame rate of a context's videos and of a recorded screencast (Firefox and WebKit capture at most 25 per second; the driver refuses 0). `ShowActionsOptions::style`, a `ShowActionsStyle` of CSS for the action-point marker, the target highlight, and the title, restyles the action decorations, and `RecordVideo::show_actions` puts those decorations into a context's videos, which the crate had no way to ask for.
+- **Passkey signature counters: `VirtualCredential::sign_count` and `CredentialsCreateOptions::sign_count`.** The driver tracks the counter each WebAuthn assertion increments and saves it in a storage state, but `VirtualCredential` had no field for it, so a state saved and restored through this crate restarted every counter at 0, which a relying party that checks counters rejects. The field is read and written now (a state saved without one loads as 0), and `create` can seed a starting value.
+- **`AccessibilitySnapshotOptions::interesting_only` and `::root` setters.** 0.19.0 left this struct without them because the emulated snapshot ignores both fields; it still does, and the struct docs say so, but an option struct with public `Option` fields and no setters was the odd one out.
+
+### Changed
+
+- **Bundled Playwright driver is now 1.64.0** (was 1.63.0). Browser builds: Chromium 156, Firefox 157, WebKit 27.2; videos are now encoded as VP9. One upstream behavior change reaches Rust callers: an element inside an iframe that is itself hidden (for example `visibility: hidden`) now counts as hidden for actions, `is_visible()` and `to_be_visible()` when it is reached through `frame_locator`. A `Frame` taken from `content_frame()` does not know its iframe is hidden, so a locator on it still reports the element visible. The protocol spec was diffed across both tags: no command or parameter this crate sends was renamed, and the additive surface is listed in the v1.0 gap analysis.
+- **Starting a browser waits up to three minutes by default** (was 30 seconds). `launch`, `launch_persistent_context`, and `connect_over_cdp` without a `timeout` now send the new `DEFAULT_LAUNCH_TIMEOUT_MS`, 180,000 ms, which is the default Playwright documents for launching and the value playwright-python sends, so a cold browser start on a slow CI runner no longer fails here where the other bindings succeed. On Windows CI the crate used to substitute 60 seconds for a missing launch timeout, a bump over the old default that would now be a cut, so that override is gone and Windows gets the same three minutes. A launch that hangs takes correspondingly longer to fail; pass `timeout` to keep the old bound. `connect` keeps its 30 seconds, and every other operation keeps `DEFAULT_TIMEOUT_MS`.
+- **The bundled Node runtime is 24.21.0** (was 24.17.0), the version playwright-python pins for this driver. The assembled driver's cache directory now names its Node version (`playwright-1.64.0-mac-arm64-node24.21.0`), so a new runtime pin takes effect on a machine that already has the driver assembled instead of reusing the old one; the previous directory is left in place and can be deleted.
+- **Requests carry string call ids in the `abcd@7` shape of the other clients.** 1.64 takes a request's id verbatim as the call id it records in traces, where it used to prefix it as `call@7`, so integer ids put numeric call ids into every trace, which the trace format types as strings.
+- **Every declared span field is recorded now.** `ElementHandle::screenshot` records `bytes_len` and `BrowserContext::cookies` records `count`, both declared since the tracing work landed and never filled; `Locator::aria_snapshot` drops its never-filled `mode` field, and `ResponseObject::body` and `::http_version` drop duplicates of fields the public `Response` already records. The crate docs now say which span an event handler inherits: the connection read loop's, never the caller's.
+
+### Deprecated
+
+- **`ShowActionsOptions::font_size`**, field and setter. Playwright 1.64 deprecated it in favor of `style`, which takes CSS for the title, so `font_size(16)` becomes `style(ShowActionsStyle::default().title("font-size: 16px"))`. The driver still accepts it, so it is still sent. It will be removed in a later breaking release.
+- **`devtools` on `LaunchOptions` and `BrowserContextOptions`.** Playwright removed the option in 1.58 and the driver drops it without an error, so `.devtools(true)` has opened no DevTools panel since 0.8.7, which bundled driver 1.58.2. The field and its builder now carry `#[deprecated]` and are no longer sent. It does not make the browser headed either. For Chromium, pass `--auto-open-devtools-for-tabs` in `args` and set `headless(false)`, as the other language bindings do; on `BrowserContextOptions` that works only for `launch_persistent_context`, so for `new_context` set them on the `LaunchOptions` the browser was launched with. Both will be removed in a later breaking release.
+
+### Removed
+
+- **BREAKING: `BrowserContext::deserialize_binding_args_pub`.** A wire-format helper that was public only so `Page` could call it; it corresponds to no Playwright API and its output shape is the driver's, not the crate's. The shared function is crate-private now.
+
+### Fixed
+
+- **`Locator::screenshot` waits for its element.** It looked the element up once and failed at once with `ElementNotFound` when it was not there yet, where every other locator action, and Playwright's own `locator.screenshot`, waits up to the timeout. An element rendered a moment after the call is now captured, and one that never appears fails with `Error::Timeout`. The wait and the capture share one timeout. Like every locator action, it is now strict: a locator matching several elements fails instead of capturing the first.
+- **A regular expression returned from `evaluate` arrives as its literal** (`"/ab+c/gi"`). The driver sends it as a pattern and flags, a form the result parser did not know, so it came back as `null`.
+- **Context-level event handlers run in the read loop's `dispatch` span, as page-level ones already did.** Handlers registered on a `BrowserContext`, `Browser`, `Debugger`, `WebSocket` or `WebSocketRoute`, and a `Page`'s load and frame-navigated handlers, ran in tasks spawned with no span, so they had no parent span where a page-level handler nested under `dispatch`.
+- **Long-lived crate tasks no longer hold the caller's span open.** A span entered around `Playwright::launch` stayed open until the driver exited, because the driver's stderr reader and the SIGINT listener inherited it; `BrowserType::connect` kept its own `connect` span open for the life of the connection, with every handler nested under it. These long-lived tasks now start with no span, so the caller's span closes when the caller drops it.
+- **`BrowserContextOptions::record_har` records a HAR.** It was sent to the driver as a context parameter the driver does not have, so it was dropped without an error and no file was ever written. The recording now starts once the context exists and is written when the context closes, as in the other language bindings, for `Browser::new_context_with_options` and `BrowserType::launch_persistent_context_with_options` alike. Close the context to get the file: a browser closed without closing the context first writes nothing. An unknown `content` or `mode` string now fails context creation with `Error::InvalidArgument`, before any context is created, instead of being ignored. If the HAR cannot be written, `close` returns the error and leaves the context open, and a second `close` closes it. A context-level HAR and one started with `Tracing::start_har` record side by side.
+- **Options whose names hold an acronym reach the driver.** `javascript_enabled`, `bypass_csp`, `ignore_https_errors`, `extra_http_headers` and `base_url` on `BrowserContextOptions`, and `handle_sigint`, `handle_sigterm` and `handle_sighup` on `LaunchOptions`, were sent under names the driver does not recognize (`javascriptEnabled` rather than `javaScriptEnabled`, `baseUrl` rather than `baseURL`, `handleSigint` rather than `handleSIGINT`, and so on), and the driver drops an unknown option without an error, so each had no effect: a context built with `.javascript_enabled(false)` still ran page script, a relative `goto` under `base_url` failed, and `.handle_sigint(false)` left the default signal handling in place. This applies to `Browser::new_context_with_options`, `BrowserType::launch_persistent_context` and `BrowserType::launch_with_options` alike. `extra_http_headers` is also sent as the list of name and value pairs the driver expects rather than as a map. The runtime setters such as `BrowserContext::set_extra_http_headers` were not affected.
+- **Action and navigation timeouts (e.g. `locator.click` exceeding its timeout) map to `Error::Timeout` instead of `Error::ProtocolError`.** The server reports these with `ErrorPayload.name == "TimeoutError"`, which `parse_protocol_error` previously ignored, so callers had to string-match `"TimeoutError"` inside a `ProtocolError` message to tell a timeout from any other protocol failure.
+- **`unroute_all` honors its `behavior` argument on `Page` and `BrowserContext`.** `UnrouteBehavior::Wait` now returns only after the handler invocations already running have finished, and `UnrouteBehavior::IgnoreErrors` lets those invocations fail without a log line, matching upstream. Both were accepted and ignored: the call cleared the handler list and returned at once, so a test tearing down after `unroute_all(Some(Wait))` could race a handler still fulfilling a route.
+- **Context-level page-event handlers are wired to each page exactly once.** `on_download`, `on_frame_attached`, `on_frame_detached`, `on_frame_navigated`, `on_page_load` and `on_page_close` on a `BrowserContext` forward the matching page event, and the forwarding used to be installed by whichever registration or page arrival found the handler list empty. Two registrations racing each other double-wired every open page, so each event reached each handler twice; a page arriving while a handler was being registered could be wired by neither, so its events never reached the context at all. Every page is now wired for all six events when the context learns of it, and registering a handler only appends to the list. An error returned by one of these handlers is now logged at `warn` instead of being dropped.
+- **`expect_event("serviceworker")` on a `BrowserContext` and `expect_event("worker")` on a `Page` no longer lose the event to a waiter that already timed out.** Their waiters were popped newest-first and a caller whose timeout had passed still held its slot, so the next event went to the dead waiter and a live one waited out its own timeout. Waiters are served oldest-first and one whose caller has gone is skipped, as the other `expect_event` names already did.
+
+## [0.19.0] - 2026-09-26
+
+### Added
+
+- **Chainable setters where an option struct had none, or was missing some.** `AddLocatorHandlerOptions` gains `times` and `no_wait_after`; `HighlightOptions` gains `style`; `StartJSCoverageOptions` gains `reset_on_navigation` and `report_anonymous_scripts`; `StartCSSCoverageOptions` gains `reset_on_navigation`; `WebSocketRouteCloseOptions` gains `code` and `reason`; `RouteFromHarOptions` gains the `update_content` and `update_mode` it lacked. These structs are `#[non_exhaustive]`, so outside the crate those fields could only be set by building `default()` and mutating field by field. `AccessibilitySnapshotOptions` deliberately gets none: its two fields are ignored, which its docs now say.
+
+### Changed
+
+- **The build script assembles the driver into the user cache, not the build directory.** The path is the one `playwright-rs install` already wrote and the runtime already probed (`~/.cache/playwright-rust/<version>/` on Linux, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows), so one download serves every target directory, cargo-mutants copy, and workspace on a machine instead of one per dependency hash. Deleting the cache reassembles on the next build. `PLAYWRIGHT_DRIVER_CACHE_DIR` and `PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD` are unchanged; in CI, cache that directory alongside the browsers and drop the cache-dir knob. ADR 0007 records why this breaks cargo's write-only-to-`OUT_DIR` convention on purpose.
+- **`Error::ServerNotFound` now says what became of the bundled driver.** The build script assembles the driver at compile time, and when that download fails in a consumer's build nothing tells them: cargo shows a dependency's `cargo:warning` lines to nobody, the crate compiles, and the first launch fails with a message that said to `npm install playwright`. The message now reports the build-time outcome recorded by `build.rs` (the download failed, it was skipped with `PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD`, or the assembled driver has since gone missing from the directory it names) and the ways to get one: rebuilding, `playwright-rs install`, or `PLAYWRIGHT_DRIVER_PATH`. The variant itself is unchanged, so code matching on it still compiles.
+
+### Removed
+
+- **The Claude Code plugin channel for the agent skill.** The `.claude-plugin/` manifests are gone, so `/plugin install playwright-rs@playwright-rust` no longer resolves and an existing plugin install will not see further updates. The skill ships through one channel now: `npx skills add padamson/playwright-rust`, refreshed with `npx skills update`. The skill's own `metadata.version` is the update gate consumers compare against, and the version guard checks only that.
+
+### Fixed
+
+- **A triggered locator handler no longer stalls the action that tripped it until its timeout.** After running the handler the crate told the server to resume with a method name the driver does not have (`resolveLocatorHandler`; the protocol calls it `resolveLocatorHandlerNoReply`), the rejection was discarded, and the parked click or fill waited out its full timeout and failed. Present since the feature shipped in 0.12.0; the existing test removed the overlay before acting, so no handler ever fired under test. The resume is now sent in every case, including a handler that panics or a trigger for a uid the page no longer knows, and a failed resume is logged at `warn`.
+- **`add_locator_handler` with `times: Some(0)` is now a no-op, as upstream's is.** The invocation counter was decremented past zero on the first trigger: a debug build panicked inside the dispatch task while it held the handler registry lock, so every later locator-handler call on that page panicked too; a release build wrapped to `u32::MAX` and the "zero times" handler ran on every trigger, forever. Counted handlers still run exactly `times` times and are unregistered on the last one.
+- **A locator handler that returns an error keeps its registration**, so the next actionability check retries it, matching upstream. It used to be unregistered as if it had succeeded.
+- **`Download::path()` returns the downloaded file.** It asked the driver for `path`, a method the Artifact channel does not have; the protocol calls it `pathAfterFinished`. Every call failed with a protocol error since the method shipped, and no test called it.
+- **Routed WebSockets work end to end.** `WebSocketRoute` sent `connectToServer` and `close`, neither of which exists on its channel (the protocol has `connect` and `closePage`), and it listened for a `close` event that the server never emits (`closePage` and `closeServer` are the real ones). It also never forwarded traffic: upstream's client does the proxying itself once `connect_to_server` is called, so page messages now go to the server, server messages and closes go to the page, and a page-side close closes the server side, unless an `on_message` or `on_close` handler takes over. A handler that neither connects nor closes now leaves the page's socket open (`ensureOpened`), so a mocked socket can be written to. The route tests called `connect_to_server` inside handlers whose errors were only logged; they now assert the server's echo reaches the page, and a new test mocks replies without a server. `WebSocketRoute::is_connected()` is new.
+- **`set_default_timeout` and `set_default_navigation_timeout` no longer send the driver a command it does not have.** Each call also sent `setDefaultTimeoutNoReply` or `setDefaultNavigationTimeoutNoReply`, which no driver this crate has shipped defines (upstream dropped them when it moved the defaults client-side); the rejection was logged at `warn` on every call. The defaults were, and are, applied client-side to each call that takes a timeout, as upstream does, so behavior is unchanged apart from the log line.
+- **`remove_locator_handler` on a selector with no handler is a no-op**, matching upstream; it used to fail with a protocol error, which a `times(0)` registration or an exhausted counted handler always left behind.
+
+## [0.18.1] - 2026-09-14
+
+### Security
+
+- **Bumped transitive `rustls` 0.23.44 → 0.23.45 ([RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285))** in the workspace lockfile and in the excluded site-e2e and fuzz lockfiles. rustls accepted TLS 1.3 handshake messages sent at the wrong encryption level when they followed a key change in the same record; the transcript stays authenticated, so a network attacker cannot alter or complete a handshake, but a peer could send messages in plaintext that should have been encrypted. rustls reaches this crate through `ureq` (driver download) and the `rustls-tls` feature. The same update moves `chacha20` off a yanked 0.10.1.
+
+### Fixed
+
+- **`AddStyleTagOptionsBuilder` is re-exported from `playwright_rs::protocol`** like its `AddScriptTagOptionsBuilder` sibling. It was reachable only through `protocol::page`, the one builder in that family that was not at the shared path.
+
+## [0.18.0] - 2026-09-08
+
+### Added
+
+- **HTTP authentication: `http_credentials` on a context, and `set_http_credentials` to change them later.** A long-standing gap rather than new upstream surface: the crate had no way to authenticate at all, so a page behind basic auth could only be reached by hand-setting an `Authorization` header. A context takes several credentials and each request uses the first whose `origin` matches it, with an origin-less entry matching anything. `APIRequestContextOptions` takes them too, and is the one place `HttpCredentialsSend::Always` is honored: it sends the header without waiting to be challenged, which is what reaches a server that answers `403` rather than `401`. Browser navigation stays reactive on every engine, as upstream documents.
+- **`on_dialog_closed` on `Page` and `BrowserContext`.** Fires once a dialog has been accepted, dismissed, or closed by the user, which is how a test knows the page is interactive again rather than guessing. Context handlers run before page ones, as with `on_dialog`.
+- **`StorageStateOptions::opfs`: carry each origin's private file system.** Opt in when capturing and the files come back on restore, alongside the existing `indexed_db` and `credentials` opt-ins; `Origin::opfs` holds the driver's payload verbatim.
+- **`Locator::visible()`: match only the visible elements.** The replacement Playwright recommends for the `:visible` CSS pseudo-class; `filter(FilterOptions::default().visible(false))` is the other half, matching only hidden ones.
+- **BREAKING: `frame_locator(None)` searches every frame in the subtree**, on `Page` and now on `Frame` too, so an iframe no longer has to be located first. The rest of the locator still resolves inside a single frame, and a selector matching elements in several of them is an error rather than an arbitrary pick; `nth()`, `first()`, and `last()` panic on such a locator, since it names no iframe to index into, which is what upstream refuses too. Taking the selector by `impl Into<Option<&str>>` is what makes the argument optional: a `&String` argument no longer coerces, so `frame_locator(&name)` becomes `frame_locator(name.as_str())`.
+- **`aria_snapshot_json()` on `Locator` and `Page`:** the accessibility tree as JSON rather than YAML markup, so a caller can walk it instead of parsing text. Takes the same `mode`, `depth`, and `boxes` options as `aria_snapshot()`.
+- **`trace` feature: read your own traces without picking a second version.** It re-exports the companion parser as `playwright_rs::trace`, so `trace::open(path)` walks a recorded trace's actions and network entries with the parser version this crate already pins. Off by default, since recording traces needs none of it. Code that only reads traces can keep depending on `playwright-rs-trace` directly.
+- **BREAKING: `TraceSnapshots` chooses which snapshots a trace captures on each action.** `snapshots(true)` still means the DOM snapshot; `snapshots(TraceSnapshots::default().dom(true).aria(true).screen(true))` adds the accessibility and screen captures the trace viewer shows side by side, mirroring upstream's `snapshots: boolean | { dom, aria, screen }`. The builder call is unchanged, but the `TracingStartOptions::snapshots` field is now `Option<TraceSnapshots>` rather than `Option<bool>`: code that sets or reads the field directly migrates with `Some(true.into())`.
+- **`page.route_service()` and `context.route_service()`: serve requests from an in-process tower `Service`, with no socket.** Hand an axum `Router`, a tower-http `ServeDir`, or any `tower::Service` to a URL pattern and every matching request is rebuilt as an `http::Request`, answered by the service, and fulfilled in the browser. No listener is bound and no port is chosen, so a Rust frontend and its Rust backend can be tested end to end inside one test process, at any origin including `https://`, in a sandbox or a locked-down CI runner. It is the same mechanism as `route_from_har` with a service as the source. Behind the new `route-service` feature, on by default; the `route_service` module's rustdoc covers what the service sees, the limits of route interception compared with a real listener (whole bodies, no WebSockets, no connection-level behavior), and how to wait on a wasm frontend.
+
+### Changed
+
+- **Bundled Playwright driver is now 1.63.0** (was 1.62.1). Browser builds: Chromium 153, Firefox 155, WebKit 26.6. Install matching browsers with `npx playwright@1.63.0 install`. Playwright dropped Ubuntu 20.04 support in this release, and on Linux arm64 it now downloads the Chrome for Testing build of Chromium. The protocol spec was diffed across both tags: the only renamed parameters were the tracing capture keys below, and the release's additive surface is listed in the v1.0 gap analysis.
+
+### Fixed
+
+- **Trace snapshots and screencast capture keep working on the 1.63 driver.** 1.63 renamed every capture parameter of the tracing start command, and the driver ignores unknown parameters rather than rejecting them, so `screenshots(true)` and `snapshots(true)` silently recorded neither: traces opened with no DOM to replay and no timeline. The wire keys are now pinned by a unit test, and the tracing integration test reads its trace back through `playwright-rs-trace` rather than checking that a file appeared.
+- **`route.fulfill()` now delivers status, headers, and body to the browser, in all three engines.** The crate sent the parameters nested under a `response` key the driver ignored, and documented the result as a Playwright server limitation spanning 1.49.0 to 1.62.1. Header names are lowercased and `content-length` is filled from the body, matching playwright-python. No `content-length` is added for an empty body, as in playwright-python. HAR replay through `route_from_har` keeps several `set-cookie` headers, joined for the browser to split; upstream's HAR router keeps only the last.
+- **Frames reached through the frame tree now work.** `child_frames()` and `parent_frame()` returned frames with no page back-reference, so `frame.locator(..)` on one panicked outright: only `page.main_frame()` ever wired it. A frame now resolves its own page from the object registry, which also covers frames delivered by events. `parent_frame()` no longer panics on a current-thread runtime either, which is what `#[tokio::test]` gives you by default; it reads the registry synchronously, as `child_frames()` already did.
+- **An iframe's load no longer raises the page's `load` event.** The driver reports load state per frame, so a page with two iframes fired `page.on_load` three times and `expect_event("load")` resolved on whichever frame finished first. Only the main frame's load is the page's load, as in Playwright's other bindings.
+- **A route handler that fails before handling its route now aborts the request.** The dispatcher used to log the error and leave the request pending until the browser's timeout; it now aborts it, so the page sees a failed request.
+- **`request.all_headers()` and `response.all_headers()` join repeated headers the way upstream does.** A repeated header is joined with `, ` and repeated `set-cookie` with a newline; the request form joined everything with a newline and the response form joined cookies with `, `.
+- **`route.continue_()` and `route.fallback()` no longer corrupt a string `post_data`.** The driver reads `postData` as base64; the string form was sent raw, so `post_data("key=value")` reached the server as two garbage bytes. Both forms are now encoded, and when both are set the string form wins, which `route.fetch()` also follows now. The continue tests previously discarded their results, which is how this survived; they now assert what the server received.
+- **A browser install that leaves out the system libraries now says so in the crate's own terms.** The driver reports them missing and still exits 0, as `npx playwright install` does, so the install succeeded and the browsers failed to launch a step later. That case is now logged at `warn` naming `install_browsers_with_deps`; it is not an error, because installing the libraries separately (a Docker layer, a base image) is legitimate.
+- **`playwright-rs install --with-deps` no longer claims Linux forces it.** The flag's help text still described the pre-0.17.0 behavior, where Linux appended it regardless; it has been opt-in on every platform since. The README's CI recipe also led a consumer astray twice over: `cargo run --example` finds examples only in your own package, and Linux needs `--with-deps` or the browsers install and then fail to launch. It now shows the few lines to put in your own crate, which is what a consumer actually needs.
+- **The driver runtime overrides now take effect.** `PLAYWRIGHT_DRIVER_PATH`, `PLAYWRIGHT_NODE_EXE`, and `PLAYWRIGHT_CLI_JS` were documented as user overrides but were consulted only after the bundled driver, which every normal build has, so setting them changed nothing: the bundled Node was spawned regardless (this is the override recommended on issue [#93](https://github.com/padamson/playwright-rust/issues/93) for running the driver under Bun, and it did not work). `PLAYWRIGHT_DRIVER_PATH` is now the first place the driver directory is looked for, and `PLAYWRIGHT_NODE_EXE` and `PLAYWRIGHT_CLI_JS` each replace one half of whatever driver was found, independently: setting only `PLAYWRIGHT_NODE_EXE=bun` runs the bundled `cli.js` under Bun, a bare command name is left to `PATH` lookup, and the two together need no driver directory at all. An override that is set but points at a missing file is a new `Error::DriverMisconfigured` naming the variable, instead of a silent fall-through to the bundled driver; an exported-but-empty variable counts as unset. Alongside, the build script no longer emits the override names for the bundled driver's paths (Cargo injects build-script variables into the crate's own test and binary processes, which made the bundled driver look like an override), and `playwright-rs install` no longer overwrites a `PLAYWRIGHT_DRIVER_PATH` you already exported, so browsers are installed for the driver you pinned. Resolution without any override is unchanged.
+
+## [0.17.0] - 2026-08-23
+
+### Changed
+
+- **BREAKING: `install_browsers` no longer implicitly appends `--with-deps` on Linux.** The flag is opt-in on every platform, matching `npx playwright install`. The implicit append meant a call that asked only for browsers ran `apt-get` under `sudo`, made the CLI's own `--with-deps` flag a no-op on Linux, and offered no opt-out at all since `cfg!` is compile-time. Migration: Linux callers that want the system libraries installed alongside the browsers call `install_browsers_with_deps` (or pass `--with-deps` to the `install-browsers` example / the `cli` binary) — which is what CI workflows following the README already do.
+
+- **Console event delivery is now consistent with every other event, on `Page` and `BrowserContext` alike.** Two observable changes. First, when a message arrives, registered `on_console` handlers now run **before** a pending `expect_console_message()` resumes — the order every other page event already used — so code that awaits the expectation can rely on handler side effects having happened. Previously console alone — at both page and context level — woke the waiter first. Second, when several `expect_console_message()` calls are pending on the same page, they are now served **oldest-first**, which is what the documentation always said; the previous implementation served the newest caller first. A waiter that timed out or was cancelled no longer consumes an event that a still-live waiter behind it was owed.
+
+- **Queued `expect_*` waiters are now served oldest-first**, matching their documentation; previously the newest caller was served first. This covers `expect_request` / `expect_response` / `expect_download` / `expect_popup` / `expect_file_chooser` on `Page`, the typed `expect_event(..)` waiters on both `Page` and `BrowserContext`, and `expect_page` / `expect_console_message` on `BrowserContext`. As with console events, a waiter that timed out or was cancelled no longer consumes an event a still-live waiter behind it was owed. Handler-before-waiter ordering was already the shipped behavior for these events and is unchanged.
+
+- **`install_browsers` / `install_browsers_with_deps` now stream the installer's output** instead of swallowing it until the process exits. The old implementation captured stdout and stderr and replayed them only on failure, so the install the README recommends for CI printed nothing for the several minutes browsers download, and a stall was indistinguishable from progress. That is not hypothetical: a contended `apt` blocked the 0.16.0 release twice, each time appearing as a silent 20-minute hang. Output is copied through byte-wise rather than line-wise, so Playwright's `\r`-updated progress bars render live, and a copy is still kept so the failure message keeps the detail it always had.
+
+  Enabling this required tokio's `io-std` feature, which the crate had trimmed.
+
+## [0.16.0] - 2026-08-17
+
+### Changed
+
+- **Bundled Playwright driver is now 1.62.1** (was 1.61.1). Playwright dropped Debian 11 support in this release.
+
+  The wire contract moved with it: **1.62 removed `timeout` from every method's parameters and put it in the request metadata envelope** (`packages/protocol/spec/core.yml`). A 1.62 server ignores a `timeout` left in params, and with none in the envelope it waits indefinitely rather than falling back to a default, so any call with an explicit timeout hung instead of failing fast. The transport now relocates `timeout` into the metadata on the way out, matching how playwright-python handles the same change. Option structs are unaffected and still take `timeout`, since that is Playwright's public API in every binding.
+
+  Unchanged: `route.fulfill()` still does not transmit response bodies. The reverse-canary tests that assert this still pass against 1.62.1, so the documented affected range extends to 1.49.0-1.62.1.
+
+- **`BrowserNotInstalled` now leads with the version-safe install path.** The error still prints the one-off `npx playwright@<version> install` command (interpolated with the bundled driver version, so always correct at the moment it prints), but it recommends `install_browsers` first and warns against hardcoding the npx version in CI, where it silently goes stale on crate bumps.
+
+### Breaking changes
+
+- **`BrowserContext::storage_state()` now takes options.** It gained `StorageStateOptions`, carrying the new `credentials` flag and the `indexedDB` flag the protocol has always accepted. Following the crate's option convention, migrate `storage_state()` to `storage_state(None)`; pass `StorageStateOptions::default().credentials(true)` to capture passkeys.
+
+- **`BrowserContext::set_storage_state()` now calls the driver** instead of reconstructing the state client-side. It used to clear cookies, re-add them, then open a throwaway page per origin and replay `localStorage` through `evaluate`, which meant it could only restore what it knew how to replay and cost a navigation per origin. WebAuthn passkeys and IndexedDB now survive a restore, and no page is opened.
+
+  The driver's semantics are stricter than the old client-side ones, and that strictness is now yours: it is a **replace**, not a merge. The driver clears the HTTP cache, clears storage (localStorage, sessionStorage, IndexedDB, service workers) for every origin the context has *visited* rather than only the origins listed in the state, and a state carrying no `credentials` disposes an installed virtual authenticator along with its passkeys. Capture with `StorageStateOptions::default().credentials(true)` if the restored context should keep WebAuthn working. Cookie replacement is covered by tests; the visited-origin sweep and authenticator disposal are driver behavior documented on the method.
+
+### Removed
+
+- **`exposeBinding` no longer sends `needsHandle`.** The parameter has never appeared in the protocol spec, and the string does not occur anywhere in the 1.62 driver, so it was being discarded by the parameter validator. No behavior change; `expose_binding` and `expose_function` worked because the driver's default is what the crate wanted anyway.
+
+- **Evaluate-handle methods let the driver detect function expressions.** `Frame::evaluate_handle`, `Frame::evaluate_handle_js` and `Worker::evaluate_handle` no longer send an `isFunction` guess; absent, the driver evaluates the expression and invokes the result if it is a function. Two behavior changes follow: a bare arrow like `"x => x + 1"` (which the old prefix heuristic misclassified) now runs and yields its result instead of a handle to the un-invoked closure, and an expression that merely *evaluates to* a function (`"window.myCallback"`) is now invoked with no arguments rather than returned as a handle, matching playwright-python. There is currently no way to obtain a handle to a function value. Element-valued results now come back as usable handles too: on the wire `ElementHandle` is a `JSHandle` subtype, and the crate now views it as one instead of failing with a type mismatch.
+
+### Deprecated
+
+- **`AriaSnapshotOptions::track`** does nothing as of the 1.62 driver: Playwright removed the parameter from `frame.ariaSnapshot`, and the driver drops undeclared parameters without erroring, so it was silently a no-op. It is no longer sent on the wire and setting it now warns.
+
+### Added
+
+- **WebP screenshots.** `ScreenshotType::Webp` joins `Png` and `Jpeg` on `page.screenshot()` and `locator.screenshot()`, honouring `quality` the way `Jpeg` does.
+- **`Scroll` action option** (`scroll(Scroll::None)`) opts out of the scroll-into-view that actionability checks normally perform, so an action fails instead of scrolling when the target is out of view. Available on `click`, `dblclick`, `hover`, `tap`, `check`, `uncheck` and `drag_to`. Leaving it unset keeps Playwright's `auto` default.
+- **`Page::evaluate_with_callback()` — pass a Rust closure into JavaScript** (Playwright 1.62's function-valued evaluate arguments). The closure arrives in the expression as an async function: calling it routes the arguments to Rust, awaits the closure, and resolves with its return value. It is never installed on `window`, and the expression may stash it for later use (an event listener, a timer); the underlying binding lives until the page closes. JavaScript callers pass a function value directly; Rust has no function that can travel inside serialized data, so the callback is a dedicated parameter — parity of capability rather than of shape, consistent with how the crate renders kwargs as builders.
+- **`wait_for_function()` on `Page`, `Frame` and `Locator`.** Waits until a JavaScript expression returns truthy and resolves to its value as a `JSHandle`. Polls on `requestAnimationFrame` by default; `WaitForFunctionOptions::polling_interval` switches to a timer, which is what you need for state the page changes off-frame. The `Page`/`Frame` forms close a long-standing gap: the crate only ever sent `waitForSelector` and `waitForElementState`, so there was no way to wait on arbitrary page state. The `Locator` form is new in Playwright 1.62 and binds the matched element as the expression's first argument; it returns `()` rather than a handle, because the protocol omits the result when a selector is supplied, and the driver polls it on its own backoff schedule (`polling_interval` applies to the page-global form only). An unset timeout falls back to `set_default_timeout`, like every other wait.
+- **WebAuthn passkeys and IndexedDB in storage state** (Playwright 1.62). `storage_state(StorageStateOptions::default().credentials(true))` captures the virtual authenticator's passkeys, `.indexed_db(true)` captures each origin's IndexedDB contents (carried on `Origin::indexed_db` as the driver's opaque payload), and `set_storage_state()` restores both into another context, so an authenticated session can be saved and replayed. Both are opt-in, so a state captured without the flags is byte-identical to before.
+- **`APIResponse::timing()` and `APIResponse::response_end_timing()`** report resource timing for an API request, reusing the same `ResourceTiming` type as the browser-side `Request::timing()`. Unlike that one this is synchronous and always available, because the driver sends it with the response rather than after a later event. The driver reports the end separately, since it builds the response before the body finishes; that value is folded into `response_end` so a `ResourceTiming` means the same thing whichever side produced it.
+
+- **The repo is now a Claude Code plugin marketplace.** `/plugin marketplace add padamson/playwright-rust` followed by `/plugin install playwright-rs@playwright-rust` installs the `playwright-rs-usage` skill, replacing the `cp -r` of `.claude/skills/playwright-rs-usage/` (which still works). Only that one skill is exposed; the contributor-facing skills stay in-repo. Updates are not automatic: run `/plugin marketplace update playwright-rust` before `/plugin update`, since the catalog clone is what goes stale.
+- **A root `LICENSE` file.** The workspace manifest has always declared `Apache-2.0`, but with no license file at the repo root GitHub's API reported no license, so downstream legal scans and package indexes read the project as unlicensed.
+- **An `install-browsers` example, replacing the README's pinned `npx playwright@<version> install` CI recipe.** The hand-pinned version silently went stale whenever the bundled driver moved: dependabot bumps the crate in a downstream lockfile but cannot see a version inside a workflow `run:` step, and every browser launch then fails with `BrowserNotInstalled`. The example calls `install_browsers` / `install_browsers_with_deps`, so the browser version rides `Cargo.lock` and a crate bump moves crate, driver, and browsers together; copy it into your project's `examples/` and run `cargo run --example install-browsers -- chromium firefox webkit --with-deps` in CI. The README's CI recipes now recommend this (or the `cli` feature's installer binary outside a Cargo project) and no longer hardcode a Playwright version anywhere.
+
+### Fixed
+
+- **Live screencasts no longer stall after a few frames.** Playwright 1.62 made frame delivery flow-controlled: the driver sends a small burst and then waits for `screencastFrameAck` before sending more. The crate never acked, so an `on_frame` handler received about three frames and then went silent for as long as the screencast ran, which looks like a page that stopped animating rather than a protocol problem. Recording to a path was unaffected. Frames are now acked as they arrive, so a slow handler throttles nothing.
+
+- **URL glob matching now follows the driver's rules.** Both client-side matchers were hand-rolled and each diverged from Playwright differently, so a pattern could mean one thing to the server and another to us. They now share a port of the driver's `globToRegexPattern`.
+
+  `Page::route`, `BrowserContext::route` and `route_web_socket` matched with the `glob` crate, whose filesystem semantics are wrong for URLs: `?` matched any single character, `[...]` was a character class, and `{a,b}` alternation was unsupported entirely. A route registered as `**/*.{png,jpg}` matched nothing on the client while the server happily reported the request, so no handler ran, nothing called `continue_`/`fulfill`/`abort`, and the request hung until it timed out.
+
+  `Frame::wait_for_url` escaped `.` and let every other regex metacharacter through with its regex meaning. Query strings were the common casualty: `wait_for_url(".../search?q=*")` made the preceding `h` optional, so it never matched the URL it was written for while matching one that does not exist.
+
+  Newly supported as a result: `{a,b}` alternation, `\` to escape a literal `*`, and `/**/` matching zero directories (`a/**/b` now matches `a/b`). `?` is now literal in route patterns, matching Playwright; code relying on it as a single-character wildcard should use `*`. The `glob` dependency is dropped.
+
+- **Dropping `Playwright` no longer orphans headed browsers.** `Drop` meant to close the driver's stdin (its graceful-shutdown signal) and then SIGKILL it as a fallback, but stdin had been handed to the transport at launch, so the take was always `None` and only the SIGKILL ever ran. A SIGKILLed driver never tears down its browsers, and headed Chrome does not exit when its parent dies — so a test that panicked or timed out before `browser.close()` left "Google Chrome for Testing" processes running until killed by hand (headless Chromium exits on its own, which is why the leak went unnoticed). `Drop` and `shutdown()` now close the transport writer — EOF on the driver's stdin triggers its browser-aware exit path, the same contract playwright-python and playwright-java rely on — and wait up to 5s for the driver to exit, force-killing only if it is genuinely wedged. `Drop` blocks for that teardown (~200ms in practice); prefer `playwright.shutdown().await` where you can await.
+
+## [0.15.1] - 2026-08-02
+
+### Fixed
+
+- **A failed assertion against a pre-1.61 Playwright server no longer returns `Ok(())`.** Servers from 1.61 onward report a mismatch as a protocol error and apply `isNot` themselves; `<= 1.60` servers instead answer with a `{ matches: false }` *result* and leave negation to the client. The result body was discarded, so against such a server every `expect(...)` assertion passed regardless of the DOM — silently green, the worst failure mode a test library has. The verdict is now read and a mismatch raises `AssertionFailed`. Only reachable through `BrowserType::connect` to a version-mismatched remote, since `connect` opens a raw WebSocket with no version negotiation; the bundled driver was never affected. The error carries no `received`/`expected` detail because old servers do not send any — connect to a version-matched server for a fuller diagnostic.
+
+## [0.15.0] - 2026-07-24
+
+### Breaking changes
+
+Public-API type-consistency sweep — within the crate, the same conceptual quantity was typed several different ways. These align the types with each other and with upstream Playwright. All are mechanical call-site migrations.
+
+- **`Mouse::move_to`, `click`, `dblclick`, and `wheel` now take `f64` coordinates instead of `i32`.** Every other pixel-coordinate surface in the crate is already `f64` (`Position`, `BoundingBox`, `Touchscreen::tap`), matching upstream Playwright's floating-point pointer coords; the mouse API was the lone `i32` outlier, which capped precision and forced a lossy `f64 → i32` cast on coordinates derived from `bounding_box()`. To migrate, pass float literals: `mouse.click(150, 200, None)` → `mouse.click(150.0, 200.0, None)`. Integer-typed variables need `as f64`.
+- **`DeviceViewport` and `ScreencastSize` `width`/`height` changed from `i32` to `u32`,** matching `Viewport` (the type used to *set* a context viewport). The three "pixel dimensions" structs now agree, so a `DeviceViewport` read from a device descriptor can be handed to a `Viewport` field without a cast. `BoundingBox` stays `f64` (it is measured geometry, where sub-pixel values are real).
+- **`ScreencastStartOptions::quality` changed from `i32` to `u8`,** matching `ScreenshotOptions::quality`. Both are JPEG quality in `0..=100`; `u8` is range-honest. Migrate by dropping any wider integer type at the call site (e.g. `.quality(80i32)` → `.quality(80)`).
+- **`locator(selector)` now takes `impl Into<String>` instead of `&str`** on `Page`, `Frame`, `Locator`, and `FrameLocator`. A dynamically-built selector can be passed as an owned `String` without a `&format!(...)` borrow at the call site. Existing `&str` and `&String` call sites are unaffected (`&str: Into<String>`); the only break is for code that relied on the method being non-generic (e.g. storing it as a `fn` pointer or using turbofish).
+- **`Page::locator`, `Page::frame_locator`, and the `Page::get_by_*` helpers are now synchronous.** Locators are lazy handles: construction does no I/O (the old `async fn` bodies contained no await points) and all resolution happens at action time, which is upstream Playwright's contract in every binding. `Frame`, `Locator`, and `FrameLocator` already exposed these constructors as plain `fn`; `Page` was the odd one out, producing the `page.locator("x").await.click(None).await` double-await that consumers flagged while dogfooding. Migrate by deleting the `.await` after the constructor: `page.locator("x").await.click(None).await?` becomes `page.locator("x").click(None).await?`; same for `get_by_text`, `get_by_role`, `frame_locator`, etc. Action and assertion calls are unchanged and still await.
+- **Option-taking methods now accept `impl Into<Option<O>>` instead of `Option<O>`.** Every public action / navigation / config method that took a trailing `options: Option<SomeOptions>` (e.g. `click`, `fill`, `hover`, `check`, `tap`, `drag_to`, `screenshot`, `press`, `select_option` on `Locator`; `goto`, `pdf`, `emulate_media`, `screenshot` on `Page`; mouse/keyboard/tracing/coverage/credentials/API-request methods) now takes `impl Into<Option<SomeOptions>>`. This lets you pass options directly without wrapping: `click(ClickOptions::builder()…build())` instead of `click(Some(…))`. Existing `click(None)` and `click(Some(opts))` call sites are **unaffected** — both `Option<O>` and `O` implement `Into<Option<O>>`. The only break is for code that relied on these methods being non-generic (storing one as a `fn` pointer, or turbofishing it).
+- **Builds with `default-features = false` must now select a TLS crypto backend.** Add either the `ring` feature (the default and previous implicit backend) or `aws-lc`. This makes the driver downloader's rustls provider explicit and lets consumers remove `ring` from their graph.
+
+### Added
+
+- **Selectable `ring` / `aws-lc` TLS crypto backends.** `ureq` no longer enables its default `ring` provider. Both the build-time driver downloader and the `cli` installer construct an agent with the provider selected by the new crate features; `ring` remains default-on, while `default-features = false, features = ["aws-lc", …]` replaces it with AWS-LC. The same features also supply the crypto provider for the existing rustls WebSocket transport options. If feature unification enables both, driver downloads prefer AWS-LC; disable defaults to omit `ring` entirely.
+- **`Page::fake_file_system()` — opt-in File System Access API fake** (`crate::testing::FakeFileSystem`). Replaces `window.showSaveFilePicker` / `showOpenFilePicker` with deterministic in-memory implementations so save/open flows are testable without a native dialog: seed openable files with `set_open_file`, read back saves with `last_saved_bytes()`/`last_saved_name()`, and control `queryPermission`/`requestPermission` via `set_permission`. Requested through downstream use, where the ~40-line hand-rolled `add_init_script` shim was being re-derived per project. This is a playwright-rs convenience with no upstream Playwright equivalent (upstream cannot drive the native pickers either; microsoft/playwright#11288). The fake handles are persistable to IndexedDB (the standard "reopen last file on startup" pattern) — it swaps a serializable placeholder for the method-bearing handle on `put` and rehydrates it on read, so `indexedDB.put(handle)` does not throw `DataCloneError`. For apps that read their last file on *startup*, `FakeFileSystem::seed_on_navigation(name, bytes, permission)` re-establishes file content and permission before the app mounts on the next navigation (a plain reload otherwise clears the in-memory content and resets permission, too late for `set_open_file` to help). Scope notes: IndexedDB persistence requires a real origin (`goto` an `http://` page, not `set_content`); `showDirectoryPicker` is not faked.
+- **`APIResponse::security_details()` and `APIResponse::server_addr()`** (Playwright 1.61.0) — mirror the browser-side `Response` accessors on API responses, returning the TLS certificate details and resolved remote IP/port when the server provides them (HTTPS / when available). New parity surface; reuses the existing `SecurityDetails` / `RemoteAddr` types.
+- **`ConnectOverCdpOptions::artifacts_dir`** (Playwright 1.61.0) — set the directory where traces and downloads captured over a CDP connection are stored, via `BrowserType::connect_over_cdp`.
+- **Screencast `cursor` action decoration + frame `timestamp`** (Playwright 1.61.0) — `ShowActionsOptions::cursor(ActionCursor::Pointer)` draws a pointer cursor at each action point; `ScreencastFrame::timestamp` exposes the frame presentation time (seconds) when the driver supplies it.
+- **`WebStorage` via `Page::local_storage()` / `Page::session_storage()`** (Playwright 1.61.0) — read/write the current origin's `localStorage` and `sessionStorage` with `get_item` / `set_item` / `remove_item` / `clear` / `items`, talking to the Page channel directly (no `evaluate` round-trip). `WebStorage` and `WebStorageKind` are re-exported at the crate root.
+- **WebAuthn virtual credentials via `BrowserContext::credentials()`** (Playwright 1.61.0) — `Credentials::install` adds a virtual authenticator; `create` / `get` / `delete` register, list (with optional `rp_id`/`id` filters), and remove passkeys for `navigator.credentials` testing without hardware. `Credentials`, `VirtualCredential`, `CredentialsCreateOptions`, and `CredentialsGetOptions` are re-exported at the crate root.
+
+### Changed
+
+- **Bundled Playwright driver bumped to 1.61.1** (from 1.60.0). New server surface includes WebAuthn virtual-authenticator credentials, a `WebStorage` API (`page.localStorage`/`sessionStorage`), `apiResponse.securityDetails()`/`serverAddr()`, and Ubuntu 26.04 support. Browser builds: Chromium 149, Firefox 151, WebKit 26.5. Install matching browsers with `npx playwright@1.61.1 install`.
+
+### Fixed
+
+- **`to_have_text` / `to_contain_text` now normalize whitespace, matching upstream `toHaveText`/`toContainText`.** Runs of whitespace — including newlines — in both the element's text and the expected string collapse to single spaces before comparison, so an element whose text renders across multiple lines (`"Scan\n→\nGroup"`) matches a single-line expectation (`"Scan → Group"`). Previously only outer whitespace was trimmed, so such assertions burned the full retry timeout and failed with a confusing mismatch. The regex variants (`to_have_text_regex` / `to_contain_text_regex`) are unchanged and still match the raw text, per upstream. Surfaced through downstream use.
+- **Known limitation (Chromium 149 / headless Linux): a `Mouse::move` while a button is held hangs.** The browser bundled with 1.61.0 treats a button-held move as a native drag whose move RPC never returns under headless Linux. Use `Locator::drag_to` for drag-and-drop; discrete `Mouse::down` / `Mouse::up` (without an intervening move) are unaffected.
+- **`to_match_aria_snapshot` adapted to the 1.61.0 `expect` protocol change.** The driver's `expect` channel method no longer returns a `{ matches }` result; it returns nothing on success and reports a failed assertion through a top-level `errorDetails` object (carrying `timedOut`, `customErrorMessage`, and `received`). The connection layer now reads `errorDetails` and maps it to `AssertionTimeout`/`AssertionFailed`. Because the driver attaches `errorDetails` to *every* `expect` error — including infrastructure failures such as the target closing mid-retry, for which it is an empty `{}` — classification keys on the object's *content*, not its presence: an empty details object is treated as a genuine protocol error (e.g. `Error::ProtocolError` for a closed target), not a failed assertion. Without this, every aria-snapshot assertion failed to deserialize the now-`null` response, and a page closed during a retrying assertion was misreported as an assertion failure. `errorDetails` is held as raw JSON and interpreted best-effort, so a future driver's wire-shape change degrades to a surfaced error rather than a dropped message that would hang the caller (which has no client-side timeout).
+
+## [0.14.1] - 2026-07-10
+
+### Security
+
+- **Bumped `crossbeam-epoch` 0.9.18 → 0.9.20 ([RUSTSEC-2026-0204](https://rustsec.org/advisories/RUSTSEC-2026-0204)) and `anyhow` 1.0.102 → 1.0.103 ([RUSTSEC-2026-0190](https://rustsec.org/advisories/RUSTSEC-2026-0190)) in the repository lockfile.** Both reach this repo only through dev-dependencies (benchmarks and tests), so no consumer of `playwright-rs` was exposed.
+
+### Fixed
+
+- **Driver acquisition survives the shutdown of Microsoft's `playwright.azureedge.net` CDN.** The prebuilt `playwright-<version>-<platform>.zip` driver archives were discontinued with that CDN (they now 404), which broke every fresh build — cold caches, new machines, and CI failed with `environment variable PLAYWRIGHT_DRIVER_VERSION not defined` (issue [#116](https://github.com/padamson/playwright-rust/issues/116)). The build script (and the `cli` feature's `playwright-rs install`) now assemble the driver from two artifacts instead: the `playwright-core` npm tarball (registry.npmjs.org) and a pinned Node.js binary (nodejs.org, currently 24.17.0) — the same model playwright-python uses — laid out identically to the old bundle so runtime behavior is unchanged ([ADR 0006](https://github.com/padamson/playwright-rust/blob/main/docs/adr/0006-driver-acquisition-assemble-locally.md)). The bundled driver stays at 1.60.0; no API changes. A failed download now compiles anyway (the runtime falls back to `PLAYWRIGHT_DRIVER_PATH` or an npm-installed Playwright, failing at launch with `ServerNotFound`) instead of poisoning downstream builds with the missing-env-var compile error, and download errors name the exact URL that failed.
+
+## [0.14.0] - 2026-06-13
+
+### Added
+
+- **Tracing + HAR types are now re-exported at the crate root** — `Tracing`, `TracingStartOptions`, `TracingStopOptions`, `StartHarOptions`, `HarMode`, and `HarContent` join every other consumer-facing type at `playwright_rs::*` (previously reachable only via `playwright_rs::protocol::*`, which still works). Surfaced by dogfooding: a consumer following the obvious `playwright_rs::Viewport` pattern hit a compile error on `playwright_rs::StartHarOptions`.
+
+- **Playwright 1.60 API polish** — the remaining 1.60 surface: `to_have_css_pseudo(name, value, pseudo)` asserts the computed style of a `::before`/`::after` pseudo-element; a `description` option on `get_by_role`; a `boxes` option on `aria_snapshot` (appends each element's `[box=x,y,width,height]`, useful for AI/visual reasoning); `WebError::location()` returning the uncaught exception's script URL/line/column; `WebSocketRoute::protocols()` (the subprotocols the page requested); a `no_defaults` option on `connect_over_cdp` (attach to a running browser without Playwright's default overrides); and `Page::hide_highlight()`. Internally, `ConsoleMessage` location now reads the 1.60 `line`/`column` keys, falling back to the deprecated `lineNumber`/`columnNumber`. With this, the crate covers the full Playwright 1.60 API surface.
+- **`BrowserContext` lifecycle events + `Browser::on_context`** — the Playwright 1.60 context-level event surface. `Browser::on_context` fires when a new context is created on the browser. `BrowserContext::on_download`, `on_frame_attached`, `on_frame_detached`, `on_frame_navigated`, `on_page_load`, and `on_page_close` observe the corresponding page events across *all* pages of a context (forwarded from each current and future page) — the idiomatic way to write multi-tab fixtures without subscribing on every page individually.
+- **Page-level `to_match_aria_snapshot`** — `expect_page(&page).to_match_aria_snapshot(...)` asserts the whole document's accessibility tree (rooted at `:root`), the page counterpart of the existing locator assertion. Matching is partial (the expected acts as a template), so it makes a robust accessibility regression guard. New API surface in Playwright 1.60.
+- **HAR recording: `Tracing::start_har` / `Tracing::stop_har`** — record a HAR (HTTP Archive) of network traffic to a file. `StartHarOptions` controls `content` (`omit`/`embed`/`attach`), `mode` (`full`/`minimal`), a `url_filter` glob, and `resources_dir`. A `.zip` path bundles bodies as attachments; any other path extracts the `.har` JSON (via the new `LocalUtils::har_unzip`). The result opens in browser devtools or replays in tests through `route_from_har`. New API surface in Playwright 1.60.
+- **`Locator::drop`** — simulate external drag-and-drop of files and/or MIME-typed data onto an element (e.g. an upload drop zone), the canonical primitive for upload-zone tests. Distinct from `drag_to` (intra-page element drag). Pass files as `FilePayload`s and `data` as `(mime_type, value)` pairs via `DropOptions`, with optional `position` and `timeout`. New API surface in Playwright 1.60.
+- **Screenshot options: `animations`, `caret`, `scale`, `style`, `mask`, `mask_color`** on `Page::screenshot` and `Locator::screenshot` (via `ScreenshotOptions`). A pre-existing playwright-python parity gap, surfaced while dogfooding the landing site (an animated tab indicator raced an element screenshot; `animations(Animations::Disabled)` is the fix). `Animations` is now always available (previously only with the `screenshot-diff` feature) and shared between `ScreenshotOptions` and the `to_have_screenshot` assertions; new `Caret` and `Scale` enums are re-exported from the crate root. `mask(Vec<Locator>)` overpaints the given locators with a solid box (color set by `mask_color`) to redact dynamic or sensitive content; each locator is serialized to the protocol's `{ frame, selector }` channel-ref shape. This completes screenshot-options parity with playwright-python.
+- **Trace-level `tracing` spans on the internal JSON-RPC layer** — Phase 2 of the observability work. `Connection::send_message` and inbound message `dispatch`, plus the pipe and websocket transport send paths, now carry `#[tracing::instrument(level = "trace")]` spans with structural fields only (`method`, `guid`, request `id`, frame `bytes_len`); `skip_all` keeps arbitrary-JSON RPC params out of the spans. Opt in with `playwright_rs=trace` for per-request protocol timing and event sequencing. Closes [#98](https://github.com/padamson/playwright-rust/issues/98) (Phase 2 sub-task of [#83](https://github.com/padamson/playwright-rust/issues/83)).
+
+### Changed
+
+- **Breaking: `FilePayload::builder()` replaced by `FilePayload::new(name, mime_type, buffer)`.** All three fields are required, so the builder's only failure mode was a runtime panic on a missing field; the constructor makes them required at compile time. `from_path` / `from_file` are unchanged.
+- **Breaking: public option/data structs and enums are now `#[non_exhaustive]`** ([ADR 0005](../../docs/adr/0005-non-exhaustive-public-types.md)). Struct-literal construction (including the `..Default::default()` form) no longer compiles downstream; construct via the existing builders (`ScreenshotOptions::builder()`, ...), the new chainable setters (`GetByRoleOptions::default().name("OK").exact(true)`, `Cookie::new(name, value).domain(...)`, `ProxySettings::new(server)`, `TracingStartOptions::default().screenshots(true)`, ...), or `Default` + field mutation. Matching on public enums (including `Error`) now needs a wildcard arm. This makes upstream Playwright option/field additions semver-minor after 1.0 instead of breaking. Geometrically closed types (`Position`, `ScreenshotClip`, `PdfMargin`, `ScreencastSize`, `Viewport`, `DeviceViewport`, `Geolocation`) stay exhaustive and keep literal construction.
+- **Breaking: `Locator::highlight()` now takes `Option<HighlightOptions>`** (previously no arguments), to carry the new 1.60 `style` option and to match Playwright's `highlight(options)` plus this crate's option-method convention. Existing calls migrate `.highlight()` → `.highlight(None)`.
+- **`build.rs` driver download is now relocatable and skippable via env.** `PLAYWRIGHT_DRIVER_CACHE_DIR` downloads the driver to a stable, version-keyed path instead of `$OUT_DIR` so CI can cache it on its own key — necessary because `Swatinem/rust-cache` prunes workspace build-script output, so a driver left in `$OUT_DIR` is *not* cached by it and re-downloads (~42 MB) every run (correcting the v0.13.0 note that claimed `$OUT_DIR` was automatically cached). `PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD` skips the download entirely for compile-only consumers (e.g. `cargo check`) that never launch a browser. Both default off; local builds are unchanged (the driver still lands in `$OUT_DIR`).
+
+### Fixed
+
+- **Rustdoc examples are now actually compile-checked.** The previous convention marked browser doctests ` ```ignore ` and "executed" them in CI with `--ignored` — but rustdoc never compiles `ignore` blocks at all, so that job had always been a green no-op and the examples had no drift protection. All 90+ doc examples are now ` ```no_run ` (compiled on every `cargo test --doc`, not executed), with hidden scaffolding so rendered docs are unchanged. The conversion surfaced and fixed ~10 silently rotted examples, including a removed method (`expect_websocket`), a sync→async drift (`BrowserContext::tracing`), and a wrong accessor (`ConsoleMessage::type_`).
+- **Connection-layer concurrency hardening.** The transport-to-dispatch message channel is now bounded (256), so a dispatch loop that falls behind exerts backpressure on the driver instead of buffering memory without limit. `wait_for_object` blocks on a `Notify` instead of polling every 10ms. `dispose()` unregisters objects synchronously instead of spawning a task, closing a window where a disposed object could still receive events (and removing a hidden tokio-runtime requirement from a sync path). The pending-callback map uses a sync lock (it was never held across an await), and the transport-writer mutex now documents that holding it across the send is the write-serialization mechanism.
+- **`Frame` no longer keeps its `Page` alive after disposal.** The frame's back-reference is cleared when the frame is disposed, breaking the `Page`↔`Frame` reference cycle that previously kept both objects in memory after a page closed (`frame.page()` returns `None` once the frame is disposed).
+- **`Page::locator()` / `frame_locator()` can no longer panic.** They previously `.expect()`-ed a per-call registry lookup of the main frame, which panicked if the page had been closed. The main frame is now resolved once at `Page` construction (matching playwright-python), making locator creation genuinely infallible; actions on a closed page still fail with a normal `Error`. `Page::url()` now always reads through the main frame too, instead of a fallback cache. The remaining flagged panics on public paths (`FilePayload` builder, root-object init, a CDP params invariant) were converted to errors or made unreachable.
+
+## [0.13.0] - 2026-05-23
+
+### Security
+
+- Bumped transitive `openssl` from 0.10.79 to 0.10.80 to pick up the fix for [GHSA-phqj-4mhp-q6mq](https://github.com/advisories/GHSA-phqj-4mhp-q6mq) — potential out-of-bounds write in `CipherCtxRef::cipher_update_inplace` for AES-KW-PAD ciphers. We don't use AES-KW-PAD anywhere; the path enters the tree transitively via `tokio-tungstenite` → `native-tls` → `openssl`. Affected the workspace `Cargo.lock` and the fuzz target's lockfile; both now resolve to 0.10.80+. Detected by Dependabot (alerts #17 / #18).
+- Bumped transitive `openssl` from 0.10.78 to 0.10.79 to pick up the fix for [GHSA-xp3w-r5p5-63rr](https://github.com/advisories/GHSA-xp3w-r5p5-63rr) / [CVE-2026-42327](https://www.cve.org/CVERecord?id=CVE-2026-42327) — undefined behaviour in `X509Ref::ocsp_responders` for certificates with non-UTF-8 OCSP URLs. Affected the workspace `Cargo.lock` and the fuzz target's lockfile; both now resolve to 0.10.79+. We pull `openssl` transitively via `native-tls` (the default TLS feature); no public-API impact. Detected by Dependabot (alerts #15 / #16); `cargo audit` had not yet picked up the advisory at fix time.
+- Refreshed `supply-chain/imports.lock` exemptions for the bumped `openssl` and `openssl-sys` versions via `cargo vet regenerate exemptions`. `cargo vet`, `cargo audit`, `cargo deny check` all green post-bump.
+- Adopted transitively-trusted publishers (`cargo vet trust --all`) for BurntSushi, Lokathor, epage, seanmonstar, and kennykerr (the latter three with `--allow-multiple-publishers` for flagship multi-maintainer crates like `clap`, `tower`, `windows-*`). Also added the fermyon trust import. Net effect: **215 → 168 exemptions** (-47, ~22% reduction) with zero first-hand audit work — every dropped exemption is now backed by a trusted publisher already vetted by 2+ trust roots we import (Mozilla, Google, ISRG, etc.). `cargo vet`, `cargo audit`, `cargo deny check` all green.
+
+### Breaking changes
+
+- **`Locator::aria_snapshot()` now takes `Option<AriaSnapshotOptions>`.** The Playwright 1.59 `ariaSnapshot` RPC accepts `mode` (Ai or Default), `track`, `depth`, and `timeout`; we now surface those through a struct passed to `aria_snapshot(...)`. To migrate, change `locator.aria_snapshot()` → `locator.aria_snapshot(None)`. The newly-added `Page::aria_snapshot(options)` lands in this release with the same shape, so it's not a migration concern there. See the matching entry under **Added** for the full motivation.
+- **`ScreencastFrame::data` changed from `Vec<u8>` to `bytes::Bytes`.** With high-FPS streams and multiple registered handlers, the previous shape allocated a fresh `Vec<u8>` for every handler on every frame; `Bytes` makes the decoded JPEG allocate exactly once per frame and lets each handler-clone be a refcount bump rather than a memcpy. Downstream sinks that pipe to `axum`, `tonic`, `tokio_util::codec`, or any `Bytes`-aware API now hand off without copying. `Bytes` implements `Deref<Target = [u8]>`, so most existing reads (`frame.data.len()`, `&frame.data[..]`, `tokio::fs::write(path, &frame.data)`) compile unchanged; the only migration is for code that consumed the buffer by value (e.g. `let v: Vec<u8> = frame.data` → `let v = frame.data.to_vec()`). Closes [#85](https://github.com/padamson/playwright-rust/issues/85) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+
+### Changed
+
+- **Playwright driver upgraded to 1.60.0** (from 1.59.1) — picks up current Chromium 148 / Firefox 150 / WebKit 26.4 binaries and removes long-deprecated upstream APIs (`Locator.ariaRef`, the `handle` option on `exposeBinding`, the `logger` option on `connect`/`connectOverCDP`, and the `videosPath`/`videoSize` context options) — none of which were exposed in this crate, so the bump is source-compatible. The `route.fulfill()` body-transmission reverse-canary still passes against 1.60.0, so the documented limitation range is extended to 1.49.0 – 1.60.0. New 1.60 surface (HAR tracing API, `Locator::drop`, expanded BrowserContext lifecycle events, `description` on `get_by_role`, `pseudo` on `to_have_css`, etc.) is tracked separately under the v1.0 gap analysis for incremental rollout pre-1.0.
+- **`build.rs` writes the Playwright driver into Cargo's `$OUT_DIR` instead of `<repo>/drivers/`.** The previous strategy walked up from `CARGO_MANIFEST_DIR` looking for a workspace `Cargo.toml`, which misbehaved when playwright-rs was consumed as a git dependency: the walk wandered into `$CARGO_HOME/git/checkouts/...`, and the resolved `drivers/` directory did not survive Cargo's CI cache restore (the embedded driver path in the cached `.rlib` pointed at a directory that no longer existed; runtime fell through to `Error::ServerNotFound`). `$OUT_DIR` is the idiomatic Rust location for build-script artifacts and is automatically cached by any `target/`-cache CI configuration. Dropped the `dirs` build-dependency. Runtime resolution is unchanged for library consumers — `option_env!()` picks up wherever build.rs writes — so this is a behaviour change for shell scripts / CI configs that hardcoded `<repo>/drivers/`, not a Rust API break.
+- **CI workflows no longer cache `<repo>/drivers/`.** `Cache Playwright Drivers` steps in `.github/workflows/test.yml` and `.github/workflows/release.yml` are removed; the existing `target/` cache covers `$OUT_DIR`. The three OS-conditional hardcoded `drivers/playwright-<version>-<platform>/node ... cli.js install` shell invocations are replaced with a single cross-platform `cargo run --release --bin playwright-rs --features cli -- install chromium firefox webkit` step.
+- **Integration tests use the public `get_driver_executable()` API.** Three tests in `crates/playwright/tests/integration/connection.rs` previously hardcoded `env!("CARGO_MANIFEST_DIR").join("drivers")` and probed the filesystem; they now call `crate::common::playwright_package_dir()` which wraps the public driver-resolution API. Removes implicit dependence on the legacy `<repo>/drivers/` layout.
+- **`build.rs`: replaced `reqwest` with `ureq`** for the one blocking driver download from Azure CDN. `reqwest` pulled in hyper, tower, h2, and ~220 lines of transitive build-time dependencies for a single GET; `ureq` is a thin synchronous client that covers the use case directly. Cuts our total `cargo tree` size from ~619 → ~507 lines (~18%). Build-only change, zero user-facing impact. Closes [#63](https://github.com/padamson/playwright-rust/issues/63) (sub-task of [#62](https://github.com/padamson/playwright-rust/issues/62)).
+- **Narrowed `tokio` features from `"full"` to the explicit subset we use** (`fs`, `io-util`, `macros`, `net`, `process`, `rt`, `rt-multi-thread`, `signal`, `sync`, `time`). Drops the unused `parking_lot`, `tracing`, and `io-std` features. No public API change; this just documents the runtime surface we depend on. Closes [#64](https://github.com/padamson/playwright-rust/issues/64) (sub-task of [#62](https://github.com/padamson/playwright-rust/issues/62)).
+- **Replaced `mime_guess` with a small hand-rolled extension-to-MIME map.** `mime_guess` ships a compile-time lookup table for hundreds of MIME types we'd never encounter for browser-automation file uploads. The new helper covers the ~40 extensions actually relevant (images, documents, archives, common text/data formats) and falls back to `application/octet-stream`. Internal-use only; SemVer-compatible. Closes [#65](https://github.com/padamson/playwright-rust/issues/65) (sub-task of [#62](https://github.com/padamson/playwright-rust/issues/62)).
+
+### Added
+
+- **`playwright-rs` binary (feature `cli`).** clap-based CLI shipped behind the new `cli` feature. Initial subcommand: `playwright-rs install [BROWSERS]... [--with-deps] [--driver-only]`. The binary downloads the Playwright driver into a stable user-cache directory (`~/Library/Caches/playwright-rust/<version>/` on macOS, `~/.cache/playwright-rust/<version>/` on Linux, `%LOCALAPPDATA%\playwright-rust\<version>\` on Windows) and then invokes the browser installer. Discoverable via `cargo install playwright-rs --features cli`. Future-proofed for `playwright-rs driver path` / `driver version` subcommands.
+- **`get_driver_executable()` runtime resolution adds a user-cache lookup.** Between the compile-time bundled lookup and the existing env-var/npm fallbacks, the resolver now probes `dirs::cache_dir()/playwright-rust/<version>/playwright-<version>-<platform>/`. This is the location that `playwright-rs install` populates, so downstream binaries distributed via `cargo install` can rely on a stable runtime driver path after the user runs the installer once.
+- **`Page::aria_snapshot(options)`** — page-level shorthand for `page.locator("body").aria_snapshot(options)`. Returns the ARIA accessibility tree for the entire page as a YAML string. Closes [#70](https://github.com/padamson/playwright-rust/issues/70) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`AriaSnapshotOptions` on both `Locator::aria_snapshot` and `Page::aria_snapshot`** — surfaces the Playwright 1.59 `mode`, `track`, `depth`, and `timeout` parameters. The headline knob is `mode: AriaSnapshotMode::Ai` for AI-friendly snapshots intended for LLM/codegen consumption (the default mode is the human-readable form). Re-exported as `AriaSnapshotMode` and `AriaSnapshotOptions` from the crate root. **Breaking:** the `Locator::aria_snapshot()` no-arg signature is gone; the new shape is `aria_snapshot(options: Option<AriaSnapshotOptions>)`. Migration is one character per call site — pass `None` to keep the prior behaviour.
+- **`TracingStartOptions::live`** — new field; when `Some(true)`, enables Playwright's live-trace mode so a viewer can attach to an in-progress recording. Forwarded as `{"live": true}` to the `tracingStart` RPC. Closes [#71](https://github.com/padamson/playwright-rust/issues/71) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`Locator::normalize()`** — returns a new locator whose selector has been resolved to a best-practices canonical form (test-ids, ARIA roles, accessible text). Useful as a building block for codegen helpers. Calls Playwright's `resolveSelector` RPC under the hood. Closes [#69](https://github.com/padamson/playwright-rust/issues/69) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`LaunchOptions::artifacts_dir`** — surfaces Playwright's `artifactsDir` launch option so consumers can choose where traces, video, and downloads land instead of letting Playwright pick a temp directory. Builder method `LaunchOptions::artifacts_dir(path)`. Closes [#72](https://github.com/padamson/playwright-rust/issues/72) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`Page::clear_console_messages()` / `Page::clear_page_errors()`** — drop everything in the respective accumulators so the next `page.console_messages()` / `page.page_errors()` call starts from empty. Useful between test phases when you want to assert against only messages from a specific phase. The JS-style `predicate` filter argument from Playwright was deliberately not added — Rust users can chain `.into_iter().filter(...)` on the existing getter result, which is more idiomatic. Closes [#73](https://github.com/padamson/playwright-rust/issues/73) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`Page::pick_locator()` / `Page::cancel_pick_locator()`** — programmatic entry to the Playwright Inspector's interactive element picker. `pick_locator()` blocks until the user clicks an element and returns a `Locator` for it; `cancel_pick_locator()` aborts an in-progress pick from a different async context. Synthetic clicks (e.g. `page.mouse.click`) do **not** complete the picker — the resolution requires a real DOM click — so test coverage focuses on the cancel-then-release pathway rather than a happy-path pick. Closes [#76](https://github.com/padamson/playwright-rust/issues/76) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`CDPSession::on(method, handler)` / `CDPSession::on_close(handler)`** — the missing event side of the CDP API. `on(method, ...)` registers a handler keyed by CDP event method name (e.g. `"Network.requestWillBeSent"`); the Playwright server forwards every CDP event so no Playwright-side subscription is needed, but you typically still need to enable the CDP domain itself first (e.g. `session.send("Network.enable", None).await?`). `on_close(...)` registers a handler that fires when the session is detached. Closes [#74](https://github.com/padamson/playwright-rust/issues/74) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`Page::screencast()` — full Playwright 1.59 screencast surface.** `Page::screencast()` returns a `Screencast` handle exposing the live-streaming, recording, and annotation surfaces of the 1.59 protocol:
+  - **Live streaming** — `start(options)` + `on_frame(handler)` deliver JPEG frames as `ScreencastFrame { data: bytes::Bytes }` as the browser renders. `ScreencastStartOptions` covers `size`, `quality`, and `path`.
+  - **Recording-to-disk** — when `ScreencastStartOptions::path` is set, the screencast is also recorded to that file; `stop()` saves and closes it via the same `Artifact` mechanism `Video` uses. Distinct lifecycle from `Video`: `Video` (via `BrowserContextOptions::record_video`) captures the entire page session automatically; screencast `path` captures only during the user-initiated start/stop window.
+  - **Action labels** — `show_actions(ShowActionsOptions { duration, position, font_size })` overlays each action as it's invoked; `hide_actions()` stops.
+  - **Chapter cards** — `show_chapter(title, ChapterOptions { description, duration })` marks named phases for an agent's video log.
+  - **HTML overlays** — `show_overlay(html, options) -> OverlayId`, `remove_overlay(id)`, `set_overlay_visible(bool)`. Arbitrary HTML rendered over the streamed frames; useful for agent annotations.
+
+  Useful for "agent receipts": an LLM-driven flow can observe the browser as it works, produce an annotated video log alongside the action log, and split the recording into named phases. Closes [#79](https://github.com/padamson/playwright-rust/issues/79) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`Debugger` class + `BrowserContext::debugger()` accessor** — programmatic control of Playwright Inspector's "PAUSED" overlay (IDE / inspector tooling, distinct from the MCP / agent codegen path). New `Debugger` exposes `request_pause()`, `resume()`, `next()`, `run_to(location)`, `paused_details()` getter, `is_paused()` convenience, and `on_paused_state_changed(handler)` event. `PausedDetails` and `PausedLocation` re-exported from the crate root. Closes [#75](https://github.com/padamson/playwright-rust/issues/75) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`screenshot-diff` feature flag (opt-in).** Gates `Expectation::to_have_screenshot` / `PageExpectation::to_have_screenshot` and the related types (`Animations`, `ScreenshotAssertionOptions`, `ScreenshotAssertionOptionsBuilder`) along with the `image` dependency. Enable with `features = ["screenshot-diff"]` to add the `image` crate and pixel-diff support; default-off keeps cold builds lean for the majority of consumers, who don't use pixel-diff assertions. Closes [#66](https://github.com/padamson/playwright-rust/issues/66) and [#67](https://github.com/padamson/playwright-rust/issues/67) (sub-tasks of [#62](https://github.com/padamson/playwright-rust/issues/62)).
+- **`tracing` instrumentation across the public async surface** — every public async method on `Browser`, `BrowserContext`, `BrowserType`, `Page`, `Frame`, `Locator`, `ElementHandle`, `Tracing`, `CDPSession`, `Debugger`, `Screencast`, `Request`, `Response`, `Dialog`, `Download`, `Worker`, and `FileChooser` now carries a `#[tracing::instrument]` attribute. Top-level user operations (`goto`, `click`, `fill`, `screenshot`, `pdf`, `evaluate`, `tracing.start/stop`, `browser.close`, `browser_type.launch`) emit at `info`; most public-API spans at `debug`. **Wire-protocol chatter** (per-message `Sending message` / `Request JSON` / `Dispatching message` / per-object `__create__` / `Disposed object` / per-event `Event on {guid}`) emits at `trace` so `playwright_rs=debug` stays quiet and readable; opt in to the firehose with `playwright_rs=trace`. Spans expose cardinality-bounded identifiers (`guid`, `selector`, `url`, `name`, `method`) and selected completion-time fields (`status` on `goto`, `bytes_len` on `screenshot`/`pdf`/`body`/`stop_tracing`, `count` on `Locator::count`, `version` on `http_version`); sensitive payloads (input values, eval expressions, request/response bodies) are deliberately excluded. Internal `tokio::spawn` sites in `Page`, `BrowserType`, `CDPSession`, `Connection`, `ChannelOwnerImpl`, `PlaywrightServer`, and `tty_guard` are wrapped with `Instrument::in_current_span()` so user-registered handlers and event fan-out tasks inherit the caller's span context. Wire up any `tracing_subscriber` and you get rich spans for free; see the new "Observability" section in the crate root rustdoc. Phase 2 follow-ups (internal-RPC `trace`-level spans, OTel semantic-convention alignment, sensitive-data spans) tracked in [#83](https://github.com/padamson/playwright-rust/issues/83). Closes [#84](https://github.com/padamson/playwright-rust/issues/84) and [#91](https://github.com/padamson/playwright-rust/issues/91) (sub-task of [#55](https://github.com/padamson/playwright-rust/issues/55), v0.13.0).
+- **`playwright_rs::locator!()` compile-time-validated selector macro** — re-exported from the new companion crate [`playwright-rs-macros`](../playwright-rs-macros/CHANGELOG.md) (independently versioned). Gated behind a default-on `macros` feature; opt out with `default-features = false` to skip the proc-macro dependency. Closes [#81](https://github.com/padamson/playwright-rust/issues/81). See the macros crate's CHANGELOG for the macro's own release notes.
+- **`Page::set_url_fragment(hash)` / `Page::clear_url_fragment()`** — typed helpers wrapping `history.replaceState` so test suites that click anchor links can mutate the URL fragment without dropping to an `evaluate_value` JS string. `set_url_fragment` accepts a fragment with or without a leading `#`; `clear_url_fragment` strips any trailing `#...`. Neither fires a real navigation. Closes [#89](https://github.com/padamson/playwright-rust/issues/89).
+- **Debug-build runtime-binding assertion on `Browser`.** A `Browser` (and every protocol object descended from it) is bound to the tokio runtime that launched it; sharing one across runtimes (e.g. caching via `OnceCell<Browser>` between `#[tokio::test]` invocations whose runtimes have already exited) silently deadlocks because the protocol channels point at a dead runtime. Debug builds now `panic!` on the wire path with a clear message when this happens; release builds skip the check (zero overhead). Pairs with a new "Runtime binding" section in the [`Browser`](crate::Browser) rustdoc explaining the constraint and the workaround (launch a fresh `Playwright` + `Browser` per test). Closes [#90](https://github.com/padamson/playwright-rust/issues/90).
+
+### Removed
+
+- **`<repo>/drivers/` directory is no longer created or read.** If you relied on this path (e.g. shell scripts pointing `PLAYWRIGHT_DRIVER_PATH` at `./drivers/playwright-<version>-<platform>`), the driver now lives under `target/<profile>/build/playwright-rs-<hash>/out/playwright-driver/` for in-workspace builds and under `dirs::cache_dir()/playwright-rust/<version>/` after running `playwright-rs install`. The runtime resolution chain finds both automatically; `PLAYWRIGHT_DRIVER_PATH` remains supported as an explicit user override.
+
+## [0.12.3] - 2026-04-30
+
+### Fixed
+
+- **Ctrl-C no longer breaks the user's shell terminal (Unix)** — running a Playwright program and hitting Ctrl-C used to leave the shell with arrow keys echoing as raw `^[[A` instead of recalling history; recovering required `stty sane` or `reset`. Two layers fix it: (1) the Node driver is now spawned in its own process group via `process_group(0)`, so SIGINT only signals our Rust process and Node runs `gracefullyProcessExitDoNotHang` instead of crashing on EPIPE while chromium events are in flight; (2) the driver's stderr is piped and drained into `tracing::debug!` on target `playwright_rs::driver_stderr` instead of being inherited from our tty, so any terminal-capability queries Node writes during shutdown don't pollute the user's terminal. Closes [#59](https://github.com/padamson/playwright-rust/issues/59). A defensive tty-snapshot/restore SIGINT handler is also installed as belt-and-suspenders; opt-out via `PLAYWRIGHT_NO_SIGNAL_HANDLER=1`.
+
+### Added
+
+- **`trace_on_failure` example + README "Testing & Debugging" section** — idiomatic Rust pattern for ensuring `tracing.stop()` / `browser.close()` run on test failure (since `?` and `unwrap()` skip subsequent cleanup) and for getting line-pinpointed failures despite `?` hiding source location. Closest to the Java/.NET pattern (explicit try-finally) since Rust has no first-party Playwright test runner and no async `Drop`. Closes [#61](https://github.com/padamson/playwright-rust/issues/61).
+
+### Changed
+
+- **Release workflow: stripped dead CLI-binary scaffolding** — we're a library-only crate, so the build/strip/archive/upload-asset/SLSA-attestation steps were no-ops guarded by `if [ -f playwright ]`. Removing them eliminates the cosmetic "Could not find subject" red annotations that appeared on every release. Closes [#56](https://github.com/padamson/playwright-rust/issues/56).
+
+## [0.12.2] - 2026-04-27
+
+### Added
+
+- **Locator assertions** — `to_have_attribute(name, value)`, `to_have_class(expected)`, `to_have_css(name, value)`, `to_have_count(count)`, plus `_regex` variants for the first three. Closes [#58](https://github.com/padamson/playwright-rust/issues/58).
+
+## [0.12.1] - 2026-04-25
+
+### Security
+
+- **`RUSTSEC-2026-0104`** — bump `rustls-webpki` from `0.103.12` to `0.103.13`. Reachable panic in CRL parsing via `BorrowedCertRevocationList::from_der` when handling a syntactically valid empty `BIT STRING` in the `onlySomeReasons` element of an `IssuingDistributionPoint` extension. Reachable prior to signature verification. Applications that don't use CRLs are not affected. Advisory: <https://rustsec.org/advisories/RUSTSEC-2026-0104>
+
+## [0.12.0] - 2026-04-19
+
+### Added
+
+- **`context.set_storage_state(state)`** — replaces cookies and localStorage on an existing context without recreation (implemented client-side: clear cookies, add new cookies, restore per-origin localStorage via JS evaluation)
+- **`context.is_closed()`** — returns `true` after `close()` or a server-initiated "close" event
+- **`context.clock()` / `page.clock()`** — Clock API for fake timer control in deterministic tests
+  - `Clock::install(options)` — install fake timers, optionally setting an initial epoch timestamp (`clockInstall` RPC on BrowserContext channel)
+  - `Clock::fast_forward(ticks)` — advance the clock by milliseconds, firing due timers (`clockFastForward` RPC with `ticksNumber`)
+  - `Clock::pause_at(time)` — jump to an epoch timestamp and pause; no timers fire until resumed (`clockPauseAt` RPC with `timeNumber`)
+  - `Clock::resume()` — resume the clock after `pause_at` (`clockResume` RPC)
+  - `Clock::set_fixed_time(time)` — freeze `Date.now()` at a fixed epoch without affecting timer scheduling (`clockSetFixedTime` RPC with `timeNumber`)
+  - `Clock::set_system_time(time)` — update system time without freezing the clock (`clockSetSystemTime` RPC with `timeNumber`)
+  - `ClockInstallOptions` — `time: Option<u64>` for setting the install epoch
+  - `page.clock()` delegates to the parent `BrowserContext::clock()` — all RPCs go on the context channel
+  - `Clock` and `ClockInstallOptions` exported from crate root
+  - See: <https://playwright.dev/docs/api/class-clock>
+
+- **`page.route_from_har(har_path, options)` / `context.route_from_har(har_path, options)`** — replays network requests from a HAR archive; uses client-side `HarRouter` pattern (calls `local_utils.har_open()` then `local_utils.har_lookup()` per request); accepts `RouteFromHarOptions` with `url` (glob filter), `not_found` (`"abort"` or `"fallback"`), `update`, `update_content`, and `update_mode` fields; maps to `harOpen`/`harLookup` RPCs on the `LocalUtils` channel
+- **`Touchscreen` class** — `page.touchscreen()` returns a `Touchscreen` handle; `touchscreen.tap(x, y)` simulates a single touch event at viewport coordinates (`touchscreenTap` RPC on Page channel); requires `has_touch: true` in `BrowserContextOptions`
+- **`page.drag_and_drop(source, target, options)`** — performs drag and drop between two CSS selectors on the main frame; delegates to `Frame::locator_drag_to` (`dragAndDrop` RPC); accepts the same `DragToOptions` as `Locator::drag_to`
+- **`page.console_messages()`** — returns all console messages accumulated since page creation (`Vec<ConsoleMessage>`); console subscription enabled by default on every BrowserContext so no handler registration required
+- **`page.page_errors()`** — returns all uncaught JS error messages accumulated since page creation (`Vec<String>`); populated automatically via `pageError` events
+- **`page.opener()`** — returns the page that opened this popup (`Option<Page>`), or `None` for non-popup pages; reads the opener GUID from the page initializer
+- **`Video` class** — `page.video()` returns `Some(Video)` when the context was created with `record_video`; `Video::path()` returns the recording path, `Video::save_as(path)` copies the file, `Video::delete()` removes it; all methods wait internally for the artifact (fired via `"video"` event on page close), so no manual sleep is required
+- **`page.request_gc()`** — forces garbage collection (Chromium only)
+- **`page.workers()`** — returns all active web workers in the page (`Vec<Worker>`); accumulated from `worker` events as workers are created
+- **`context.service_workers()`** — returns all active service workers in the browser context (`Vec<Worker>`); accumulated from `serviceWorker` events
+- **`expect_event()`** — generic event waiting on Page and BrowserContext, returning typed `EventValue` enum
+- **`playwright.request()`** — headless API testing without a browser (`get`, `post`, `put`, `delete`, `patch`, `head`, `fetch`, `APIResponse`)
+- **`to_match_aria_snapshot(expected)`** — ARIA accessibility tree assertion with auto-retry
+- **`Locator::aria_snapshot()`** — returns the ARIA accessibility tree as a YAML string (`ariaSnapshot` RPC on Frame)
+- **`Locator::describe(description)`** — returns a new Locator with a human-readable label appended to the selector (`internal:describe=...`) for cleaner trace/error output; client-side only
+- **`Locator::highlight()`** — highlights the matched element in the browser for visual debugging (`highlight` RPC on Frame)
+- **`Locator::content_frame()`** — returns a `FrameLocator` for the content of an `<iframe>` element; client-side only
+- **`ElementHandle::content_frame()`** — returns the `Frame` for an `<iframe>` element, or `None` if not an iframe (`contentFrame` RPC on ElementHandle channel)
+- **`ElementHandle::owner_frame()`** — returns the `Frame` that owns this element (`ownerFrame` RPC on ElementHandle channel)
+- **`ElementHandle::wait_for_element_state(state, timeout)`** — waits until the element reaches the given state (`"visible"`, `"hidden"`, `"stable"`, `"enabled"`, `"disabled"`, `"editable"`) (`waitForElementState` RPC on ElementHandle channel)
+- **`Accessibility` class** — `page.accessibility()` returns an `Accessibility` handle; `accessibility.snapshot(options)` returns the page's ARIA accessibility tree as a YAML string wrapped in `serde_json::Value`; implemented via `FrameAriaSnapshot` RPC (the modern Playwright equivalent — the legacy `accessibilitySnapshot` RPC was removed in current Playwright versions)
+- **`Coverage` class** — `page.coverage()` returns a `Coverage` handle (Chromium only); `start_js_coverage(options)` / `stop_js_coverage()` collect V8 JS coverage (`JSCoverageEntry` with `url`, `script_id`, `source`, `functions: Vec<JSFunctionCoverage>`); `start_css_coverage(options)` / `stop_css_coverage()` collect CSS coverage (`CSSCoverageEntry` with `url`, `text`, `ranges: Vec<CoverageRange>`); maps to `startJSCoverage` / `stopJSCoverage` / `startCSSCoverage` / `stopCSSCoverage` RPCs on the Page channel
+- **`page.add_locator_handler()` / `page.remove_locator_handler()`** — registers an async handler that Playwright calls whenever a matching element appears and blocks an actionability check (e.g. cookie banners, permission dialogs); accepts `AddLocatorHandlerOptions` with `no_wait_after` and `times`; maps to `registerLocatorHandler` / `resolveLocatorHandler` / `unregisterLocatorHandler` RPCs; handler receives the matching `Locator` as argument
+- **`page.route_web_socket(url, handler)` / `context.route_web_socket(url, handler)`** — intercepts WebSocket connections matching a URL glob pattern; handler receives a `WebSocketRoute` object with `connect_to_server()`, `close(options)`, `send(message)`, `on_message(handler)`, and `on_close(handler)`; maps to `setWebSocketInterceptionPatterns` RPC with `webSocketRoute` events; `WebSocketRoute` and `WebSocketRouteCloseOptions` exported from crate root
+- **`ConsoleMessage::timestamp()`** — epoch milliseconds (`f64`) when the message was emitted
+- **`Response::http_version()`** — HTTP version string (e.g. `"HTTP/1.1"`, `"HTTP/2.0"`) via the `httpVersion` RPC added in Playwright 1.59
+- **`Request::existing_response()`** — synchronous `Option<Response>` for the already-received response, complementing the async `response()` getter
+- **`browser.bind(title, options)` / `browser.unbind()`** — expose a playwright-rs-launched browser over WebSocket so external clients (`@playwright/mcp`, Playwright CLI, agent tooling) can attach via `BrowserType::connect()`; `BindOptions` has `host`/`port`/`workspace_dir`/`metadata`; maps to `startServer` / `stopServer` RPCs (Playwright 1.59+)
+- **Playwright driver upgraded to 1.59.1** (from 1.58.2) — required for `Response::http_version()` and picks up current Chromium/Firefox/WebKit binaries
+
+### Breaking Changes
+
+- **`BrowserContextOptions::accept_downloads` type changed** (closes #49) — field type is now `Option<AcceptDownloads>` instead of `Option<bool>`, matching the protocol's three-state `"accept"`/`"deny"`/`"internal"` string. The builder method accepts `impl Into<AcceptDownloads>`, so `bool` callers still work (`true` → `Accept`, `false` → `Deny`). Direct struct-literal construction or field pattern-matching must migrate.
+- **macOS 14 WebKit no longer supported** — Playwright 1.59 dropped macOS 14 ("Sonoma") support for WebKit. Users on macOS 14 must upgrade to macOS 15+ or pin to `playwright-rs = "0.11"` (which ships driver 1.58.2). Chromium and Firefox are unaffected on macOS 14.
+
+## [0.11.0] - 2026-04-16
+
+### Added
+
+- **New classes**: `JSHandle`, `Worker`, `WebError`, `WebSocket` (completed), `ConsoleMessage`, `FileChooser`, `Selectors`
+- **`playwright.devices()`** — device descriptor map for browser emulation (`DeviceDescriptor`, `DeviceViewport`)
+- **`ConsoleMessage::args()`** — returns `&[Arc<JSHandle>]` for console method arguments
+- **Browser methods** — `contexts()`, `browser_type()`, `on_disconnected()`, `start_tracing()`/`stop_tracing()`, `new_browser_cdp_session()`
+- **Page event handlers** — `on_close`, `on_load`, `on_crash`, `on_pageerror`, `on_popup`, `on_frameattached`, `on_framedetached`, `on_framenavigated`, `on_worker`, `on_console`, `on_filechooser`
+- **Page expect methods** — `expect_popup`, `expect_download`, `expect_response`, `expect_request`, `expect_console_message`, `expect_file_chooser`
+- **BrowserContext events** — `on_console`, `on_weberror`, `on_serviceworker`, `on_dialog`, `expect_console_message`
+
+### Breaking Changes
+
+- **`ConnectionLike` trait gains `selectors()` method** — internal server infrastructure, not user-facing API. Any code implementing `ConnectionLike` directly must add the new method.
+
+### Fixed
+
+- **unwrap() audit (closes #48)** — replaced bare `unwrap()` calls in library code with `expect()` (for infallible operations) or proper error handling (for protocol data). Remaining `unwrap()` calls are only mutex locks (`lock().unwrap()`) and test code.
+- **15 broken rustdoc links** — all intra-doc links now resolve correctly (qualified paths for cross-module references)
+
+## [0.10.0] - 2026-04-11
+
+### Added
+
+- **`BrowserContext::new_cdp_session(page)`** — creates a Chrome DevTools Protocol session (Chromium only)
+  - `CDPSession::send(method, params)` — send any CDP command and receive the result as JSON
+  - `CDPSession::detach()` — detach from the CDP session
+  - `CDPSession` registered in the object factory for server-created sessions
+  - See: <https://playwright.dev/docs/api/class-cdpsession>
+- **`BrowserContext::tracing()`** — access the per-context Tracing object
+  - `Tracing::start(options)` — begin trace recording (`tracingStart` + `tracingStartChunk`)
+  - `Tracing::stop(options)` — stop trace recording (`tracingStopChunk` + `tracingStop`)
+  - `TracingStartOptions` — `name`, `screenshots`, `snapshots` fields
+  - `TracingStopOptions` — `path` field to export trace as a `.zip` archive
+  - Artifact export wired through `Artifact::save_as` for path-based stop
+  - See: <https://playwright.dev/docs/api/class-tracing>
+
+- **`install_browsers()` / `install_browsers_with_deps()`** — programmatic browser installation (closes #46)
+  - `install_browsers(None)` — install all browsers
+  - `install_browsers(Some(&["chromium", "firefox"]))` — install specific browsers
+  - `install_browsers_with_deps(browsers)` — also installs system dependencies (useful for CI)
+  - Reuses the bundled Playwright driver — no `npx` required
+- **Frame public API completion** — Frame now at **100%** coverage
+  - `frame.locator(selector)` — create Locator scoped to a frame (was internal-only)
+  - All 7 `get_by_*` methods (`get_by_text`, `get_by_label`, `get_by_role`, etc.)
+  - `evaluate_handle(expression)` — returns ElementHandle from JS evaluation
+  - `child_frames()` — returns child frames by scanning the connection registry
+  - Properties: `name()`, `page()`, `parent_frame()`, `is_detached()`
+  - `frame.page()` back-reference set lazily when Page accesses its main frame
+- **`FrameLocator` class** — locate elements inside iframes using Playwright's `internal:control=enter-frame` selector engine
+  - `page.frame_locator(selector)` / `locator.frame_locator(selector)` — entry points
+  - `frame_locator.locator(selector)` — create Locator inside iframe
+  - `frame_locator.frame_locator(selector)` — nested iframes
+  - All 7 `get_by_*` methods (`get_by_text`, `get_by_label`, `get_by_role`, etc.)
+  - `first()`, `last()`, `nth(index)` — composition for multiple matching iframes
+  - `owner()` — Locator for the iframe element itself
+- **`ConnectionExt` extension trait** — typed object retrieval via `connection.get_typed::<T>(guid).await?`, eliminating boilerplate `get_object` + `as_any().downcast_ref::<T>()` pattern
+- **`downcast_parent<T>()` helper** — one-line parent type resolution replacing manual parent + downcast chains
+- **`Error::TypeMismatch`** — structured error variant with guid, expected type, and actual type for better diagnostics
+
+### Breaking Changes
+
+- **MSRV bumped from 1.85 to 1.88** — transitive dependencies (`icu_*`, `image`, `time`, `zip`) now require Rust 1.88
+- **`ConnectionLike` trait uses `#[async_trait]`** — methods migrated from manual `Pin<Box<dyn Future>>` returns to idiomatic `async fn`. Any code implementing `ConnectionLike` directly must update method signatures (internal server infrastructure, not user-facing API).
+
+### Changed
+
+- **Security & quality CI** — `cargo audit` and `cargo deny` run on every push to main and weekly; mutation testing moved from `test.yml` to dedicated `security.yml` with weekly schedule + release tag triggers; MSRV check (Rust 1.85) in `test.yml`
+- **`deny.toml`** — license compliance (Apache-2.0 compatible), crate bans, source restrictions, duplicate detection
+- **`cargo vet`** — supply chain review with trusted imports from 7 organizations; new dependencies require audit
+- **SLSA provenance** — release artifacts include signed build attestations via `actions/attest-build-provenance`
+- **Fuzz targets** — `cargo-fuzz` targets for `parse_value`, `serialize_argument`, `parse_result` (protocol parsing layer)
+- **BrowserContext event handlers** — context-level event subscriptions (fire before page handlers)
+  - `on_page(handler)` — fires when new page created in context
+  - `on_close(handler)` — fires when context is closed
+  - `on_request(handler)` / `on_request_finished(handler)` / `on_request_failed(handler)` — network events from any page
+  - `on_response(handler)` — response events from any page
+- **`expect_page()` / `expect_close()`** — promise-based event waiting with timeout
+  - `expect_page(timeout)` — returns `EventWaiter<Page>` that resolves when a new page is created
+  - `expect_close(timeout)` — returns `EventWaiter<()>` that resolves when the context closes
+  - `EventWaiter<T>` — generic one-shot waiter backed by `tokio::sync::oneshot` with configurable timeout (default 30s)
+- **`on_dialog(handler)`** — context-level dialog handler, fires before page handlers
+- **`expose_function()` / `expose_binding()`** — JS→Rust callback bridge on both BrowserContext and Page
+  - `expose_function(name, callback)` — inject a Rust function callable from JS as `window[name](...)`
+  - `expose_binding(name, callback)` — same with source info (note: `needsHandle: true` not yet supported)
+  - BindingCall protocol object for handling JS→Rust invocations
+- Added `async-trait` as a dependency
+
+## [0.9.0] - 2026-03-27
+
+### Added
+
+- **Back-reference properties** — navigate the protocol object hierarchy from child to parent
+  - `dialog.page()` — returns the `Page` that owns the dialog (via protocol parent)
+  - `download.page()` — returns the `Page` that triggered the download (stored at construction)
+  - `response.request()` — returns the `Request` that triggered the response (via ResponseObject parent)
+  - `response.frame()` — returns the `Frame` that initiated the request (delegates to `request.frame()`)
+  - `request.frame()` — returns the `Frame` that initiated the request (eagerly resolved from initializer GUID)
+- **Response server info** — inspect connection and TLS details
+  - `response.security_details()` — TLS/SSL certificate info (`SecurityDetails`: issuer, protocol, subject_name, valid_from, valid_to); returns `None` for HTTP
+  - `response.server_addr()` — server IP address and port (`RemoteAddr`); returns `None` for cached responses
+  - `response.finished()` — wait for response to finish loading (currently returns immediately for goto/reload responses)
+- **Request completion methods** — full request lifecycle access
+  - `request.redirected_from()` / `request.redirected_to()` — navigate the redirect chain (eagerly resolved from initializer)
+  - `request.response()` — get the matching `Response` via RPC
+  - `request.sizes()` — resource size info (`RequestSizes`: request_body_size, request_headers_size, response_body_size, response_headers_size)
+- **New types**: `SecurityDetails`, `RemoteAddr`, `RequestSizes` (exported from `playwright_rs::protocol`)
+- **Page assertions** — `expect_page(&page)` now supports title and URL assertions
+  - `to_have_title(expected)` / `to_have_title_regex(pattern)` — assert page title with auto-retry
+  - `to_have_url(expected)` / `to_have_url_regex(pattern)` — assert page URL with auto-retry
+  - `.not()` negation and `.with_timeout()` supported (matching locator assertion pattern)
+
+### Breaking Changes
+
+- **Response struct fields are now private** — `response.url`, `response.status`, `response.status_text`, `response.ok`, `response.headers` are no longer accessible as public fields. Use the existing accessor methods instead: `response.url()`, `response.status()`, `response.status_text()`, `response.ok()`, `response.headers()`. These methods were already available; only direct field access is removed.
+- **`Download::from_artifact` is now `pub(crate)`** — this was an internal constructor not intended for public use.
+
+### Fixed
+
+- **Request parent type corrected** — Request's parent in the Playwright protocol is Page (not Frame as previously assumed). The `request.frame()` method now correctly resolves the frame from the initializer's `frame` GUID via the connection registry.
+
+## [0.8.7] - 2026-03-24
+
+### Added
+
+- **Locator advanced methods** — `tap()`, `evaluate()`, `evaluate_all()`, `drag_to()`, `wait_for()`, `dispatch_event()`, `bounding_box()`, `scroll_into_view_if_needed()`
+  - `tap(options)` — touch-tap on an element (requires `has_touch: true` context); `TapOptions` builder with `force`, `modifiers`, `position`, `timeout`, `trial`
+  - `evaluate(expression, arg)` — run a JavaScript function with the element as first argument, returns typed `R: DeserializeOwned`
+  - `evaluate_all(expression, arg)` — run a JavaScript function with all matching elements as an array, returns typed `R: DeserializeOwned`
+  - `drag_to(target, options)` — drag this element to another; `DragToOptions` builder with `force`, `source_position`, `target_position`, `timeout`, `trial`
+  - `wait_for(options)` — wait for element to reach a state (`Visible`, `Hidden`, `Attached`, `Detached`); `WaitForOptions` with `state` and `timeout`
+  - `dispatch_event(type, event_init)` — fire DOM events with optional initialization data
+  - `bounding_box()` — get element dimensions and position (x, y, width, height)
+  - `scroll_into_view_if_needed()` — scroll element into viewport
+  - `page` property — back-reference to the owning Page from any Locator
+- **TLS backend features** — Expose `native-tls`, `rustls-tls-native-roots`, and `rustls-tls-webpki-roots` features for choosing TLS implementation (PR #41). Defaults to `native-tls`.
+- **Locator filtering & composition** — `filter()`, `and_()`, `or_()` methods for narrowing and combining locators
+  - `filter(FilterOptions)` — narrow by `has_text`, `has_not_text`, `has` (child locator), `has_not`
+  - `and_(locator)` — match elements satisfying both locators
+  - `or_(locator)` — match elements satisfying either locator
+- **Locator interaction methods** — `focus()`, `blur()`, `press_sequentially()`, `all_inner_texts()`, `all_text_contents()`
+  - `focus()` / `blur()` — set or remove keyboard focus on an element
+  - `press_sequentially(text, options)` — type characters one by one with optional delay
+  - `all_inner_texts()` / `all_text_contents()` — bulk text retrieval from all matching elements
+  - `dispatch_event(type, event_init)` — fire DOM events with optional initialization data
+  - `bounding_box()` — get element dimensions and position (x, y, width, height)
+  - `scroll_into_view_if_needed()` — scroll element into viewport
+- **BrowserContext runtime setters** — configure context after creation
+  - `cookies(urls)` — retrieve cookies, optionally filtered by URL
+  - `clear_cookies(options)` — remove cookies with optional name/domain/path filters
+  - `set_extra_http_headers(headers)` — add HTTP headers to all requests
+  - `grant_permissions(permissions, options)` — grant browser permissions (geolocation, camera, etc.)
+  - `clear_permissions()` — revoke all granted permissions
+  - `set_geolocation(geolocation)` — override device geolocation, or pass None to clear
+  - `set_offline(offline)` — toggle offline mode
+- **Page methods** — `bring_to_front()`, `viewport_size()`, `set_extra_http_headers()`, `emulate_media()`, `pdf()`, `add_script_tag()`
+  - `bring_to_front()` — activate the page tab
+  - `viewport_size()` — get current viewport dimensions (returns None if no_viewport context)
+  - `set_extra_http_headers(headers)` — add HTTP headers to all page requests
+  - `emulate_media(options)` — override CSS media type, color scheme, reduced motion, forced colors
+  - `pdf(options)` — generate PDF (Chromium only), with full options (margins, scale, landscape, etc.)
+  - `add_script_tag(options)` — inject JavaScript via URL, file path, or inline content
+- **Page timeout & state** — `set_default_timeout()`, `set_default_navigation_timeout()`, `is_closed()`, `frames()`
+  - `set_default_timeout(ms)` / `set_default_navigation_timeout(ms)` — configure default timeouts for actions and navigation
+  - `is_closed()` — check if page has been closed (tracks close events from server)
+  - `frames()` — list page frames (currently main frame only; iframe enumeration planned)
+- **BrowserContext timeout defaults** — `set_default_timeout()`, `set_default_navigation_timeout()`
+  - Propagates to all existing pages and newly created pages in the context
+- **Response body access** — `body()`, `text()`, `json()`, `all_headers()`, `header_value()`, `headers_array()`
+  - `body()` — response body as raw bytes
+  - `text()` — response body as UTF-8 string
+  - `json::<T>()` — parse response body as typed JSON (`T: DeserializeOwned`)
+  - `all_headers()` — all response headers as HashMap (merges duplicates)
+  - `header_value(name)` — get a single header value by name
+  - `headers_array()` — all headers as `Vec<HeaderEntry>` preserving duplicates
+- **Request properties** — `headers()`, `post_data()`, `post_data_buffer()`, `post_data_json()`, `failure()`, `all_headers()`, `header_value()`, `headers_array()`, `timing()`
+  - `headers()` — request headers as HashMap (from initializer)
+  - `post_data()` / `post_data_buffer()` — request body as string or bytes (base64-decoded)
+  - `post_data_json::<T>()` — parse request body as typed JSON
+  - `failure()` — error text if request failed (set on `requestFailed` event)
+  - `all_headers()` / `header_value()` / `headers_array()` — full raw headers via RPC
+  - `timing()` — `ResourceTiming` with 9 timing fields (extracted from Response on `requestFinished`)
+
+### Changed
+
+- **Playwright driver upgraded to 1.58.2** (from 1.56.1) — includes WebKit 26.0, Chromium 133, Firefox 135
+
+### Fixed
+
+- **WebKit `launchPersistentContext` now works** — Closes #39. Upgraded Playwright driver resolves "Browser started with no default context" error on macOS ARM64
+- **docs.rs build** — Pin docs.rs to `nightly-2025-05-01` to work around `generic-array` 0.14 incompatibility with Rust 1.92+ (`doc_auto_cfg` removal)
+
+## [0.8.6] - 2026-03-14
+
+### Fixed
+
+- **docs.rs build** — Skip Playwright driver download when building on docs.rs (no network access needed for documentation)
+- **Imprecise dependency versions** — Pin workspace dependencies to minor versions (e.g., `serde = "1.0"` instead of `"1"`)
+
+## [0.8.5] - 2026-03-14
+
+### Added
+
+- **`ignore_default_args` for persistent contexts** - Added `ignore_default_args` option to `BrowserContextOptions` for use with `launch_persistent_context_with_options()` (Issue #38)
+  - `IgnoreDefaultArgs::Bool(true)` - Playwright does not pass its own default args
+  - `IgnoreDefaultArgs::Array(vec)` - Filters out specific default arguments
+  - Applies same `ignoreDefaultArgs` → `ignoreAllDefaultArgs` protocol normalization as `LaunchOptions`
+  - Matches Playwright's official `launchPersistentContext` API
+- **Page network event listeners** - Subscribe to network events on individual pages (PR #37)
+  - `page.on_request(handler)` - Fires when a request is issued
+  - `page.on_response(handler)` - Fires when a response is received
+  - `page.on_request_finished(handler)` - Fires when a request completes successfully
+  - `page.on_request_failed(handler)` - Fires when a request fails
+  - Lazy subscription: events are only subscribed when a handler is registered
+  - Works with iframes and sub-resources
+- **Response accessor methods** - `response.status()`, `response.status_text()`, `response.url()` (PR #37)
+- **`page.go_back()` / `page.go_forward()`** - History navigation with optional timeout and wait_until options
+- **`page.set_content(html)`** - Set page HTML content directly, with optional timeout and wait_until options
+- **`page.wait_for_load_state(state)`** - Wait for `load`, `domcontentloaded`, or `networkidle` states
+- **`page.wait_for_url(url)`** - Wait for navigation to a matching URL (exact string or glob pattern)
+- **`locator.is_hidden()` / `locator.is_disabled()`** - Negative state checks complementing `is_visible()` and `is_enabled()`
+- **`to_have_screenshot()` visual regression assertion** (Issue #35)
+  - `expect(locator).to_have_screenshot(path, options)` — compare locator screenshot against baseline
+  - `expect_page(&page).to_have_screenshot(path, options)` — page-level screenshot comparison
+  - Auto-creates baseline on first run, compares on subsequent runs
+  - `max_diff_pixels` / `max_diff_pixel_ratio` — configurable tolerance
+  - `threshold` — per-pixel color distance tolerance (default 0.2)
+  - `animations: Disabled` — freeze CSS animations/transitions before capture
+  - `mask` — overlay locators with pink (#FF00FF) to exclude dynamic content
+  - `update_snapshots` — force baseline update
+  - Generates diff image on failure highlighting differences in red
+  - Auto-retry with timeout (default 5s), matching Playwright's assertion pattern
+
+### Fixed
+
+- Replace `unwrap()` with graceful error handling in network event dispatch (Issue #40)
+
+## [0.8.4] - 2026-03-01
+
+### Added
+
+- **`get_by_*` locators** - Modern Playwright locator methods for finding elements by user-facing attributes
+  - `get_by_text(text, exact)` - Find by text content
+  - `get_by_label(text, exact)` - Find form controls by associated label
+  - `get_by_placeholder(text, exact)` - Find inputs by placeholder text
+  - `get_by_alt_text(text, exact)` - Find images by alt text
+  - `get_by_title(text, exact)` - Find elements by title attribute
+  - `get_by_test_id(test_id)` - Find elements by `data-testid` attribute (always exact)
+  - `get_by_role(role, options)` - Find elements by ARIA role with optional name, checked, disabled, expanded, selected, level, pressed, include_hidden filters
+  - All methods available on both `Page` and `Locator` (chainable)
+  - Case-insensitive substring matching by default (`exact=false`), case-sensitive exact with `exact=true`
+  - `AriaRole` enum with 81 ARIA roles for compile-time safety
+  - `GetByRoleOptions` struct for role-based filtering
+- **`connect_over_cdp`** - Connect to Chrome DevTools Protocol endpoints (Issue #32)
+  - `browser_type.connect_over_cdp(endpoint_url, options)` - Connect to remote Chrome via CDP
+  - Supports browserless, Chrome with `--remote-debugging-port`, and other CDP services
+  - Accepts optional headers, timeout, and slow_mo options
+  - Chromium-only (returns error for Firefox/WebKit)
+- **`Locator.all()`** - Iterate over all matching elements (Issue #33)
+  - `locator.all()` returns `Vec<Locator>`, one per matching element
+  - Empty vec for non-matching selectors (no error)
+  - Matches Playwright's `locator.all()` API
+- **Improved error messages** - All locator methods now include the selector in error messages (Issue #33)
+  - Timeout errors show `[selector: div.page-number > span:last-child]` instead of generic messages
+  - Applied to all query methods (`text_content`, `get_attribute`, etc.) and action methods (`click`, `fill`, etc.)
+- **BrowserContext proxy support** - Added `proxy` option to `BrowserContextOptions` for per-context proxy configuration (PR #29, Issue #28)
+  - Enables rotating proxies without creating new browser instances
+  - Supports HTTP and SOCKS proxies with optional authentication
+- **Complete Route API** - Full network interception parity with Playwright (Issue #36)
+  - `route.fallback(overrides)` - Continue to next matching handler (handler chaining)
+  - `route.fetch(options)` - Fetch actual response for inspection/modification before fulfilling
+  - `FetchResponse` type with `status()`, `ok()`, `headers()`, `body()`, `text()`, `json()` methods
+  - `FetchOptions` builder for customizing fetch requests (method, headers, post_data, timeout)
+- **Context-level routing** - `BrowserContext.route()`, `unroute()`, `unroute_all()` for routing across all pages in a context
+- **Page unroute methods** - `page.unroute(pattern)` and `page.unroute_all()` for removing route handlers
+- **APIRequestContext** - Internal implementation for `route.fetch()` via BrowserContext's request context
+  - Handles fetch → fetchResponseBody → disposeAPIResponse protocol flow
+  - Automatic base64 encoding/decoding for request and response bodies
+- **`UnrouteBehavior` enum** - Control behavior when removing route handlers
+
+### Fixed
+
+- **`no_viewport(true)` / `--start-maximized` not working** - Fixed protocol field name for viewport disabling (Issue #34)
+  - `no_viewport` now correctly serializes as `noDefaultViewport` (matching the Playwright protocol)
+  - Previously serialized as `noViewport` which the server silently ignored
+  - Enables `--start-maximized` with `no_viewport(true)` to produce maximized browser windows
+
+## [0.8.3] - 2026-01-25
+
+### Added
+
+- **PLAYWRIGHT_VERSION constant** - Exposes bundled Playwright driver version (`1.56.1`) as a public constant for version-aware browser installation (Issue #27)
+- **Helpful browser installation errors** - Detects missing browser errors and provides actionable guidance (Issue #27)
+- **Page.content()** - Returns full HTML content of the page including DOCTYPE (Issue #23)
+  - `page.content()` - Retrieves complete HTML markup
+  - `frame.content()` - Frame-level implementation for consistency with Playwright API
+- **Page.set_viewport_size()** - Dynamically resize viewport for responsive testing (Issue #24)
+  - `page.set_viewport_size(viewport)` - Set viewport to specific width/height
+  - Enables testing mobile, tablet, and desktop layouts within a single page session
+
+### Fixed
+
+- **page.url() hash navigation** - URL now correctly includes hash fragment after anchor clicks (Issue #26)
+  - Frame now handles "navigated" events to track URL changes including hash updates
+  - Page delegates to main frame for URL (matches playwright-python/JS behavior)
+
+### Changed
+
+- **Rust Edition 2024** - Upgraded to Rust Edition 2024, requiring Rust 1.85+
+- **README documentation** - Added comprehensive browser installation section (Issue #25)
+
+## [0.8.2] - 2026-01-19
+
+### Added
+
+- **Protocol Stubs** - Explicit protocol types for `Android`, `Electron`, `Tracing`, `APIRequestContext`, and `LocalUtils` to support valid registration and prevent "Unknown protocol type" warnings. (Implemented as stubs for future expansion)
+- **Cookie & Storage Management** - Implemented `BrowserContext::storage_state()` and `BrowserContext::add_cookies()` (Issue #10)
+- **Remote Connection** - Support for connecting to remote browsers via WebSocket
+  - `BrowserType::connect(url, options)` implementation
+  - `ConnectOptions` builder for connection configuration (headers, slow_mo, timeout)
+  - WebSocket transport using `tokio-tungstenite`
+  - Internal transport abstraction supporting both options (Pipe and WebSocket)
+- **WebSocket Event Handling** - `Page::on_websocket()` for intercepting WebSocket connections (Slice 2)
+  - `WebSocket` protocol object with events: `on_frame_sent`, `on_frame_received`, `on_close`, `on_error`
+  - Access to WebSocket URL and state
+- **File Upload Helpers** - `FilePayload::from_path` and `from_file` for automatic MIME type detection and easier file uploads.
+- **Browser Context Options** - Added support for `RecordHar` and `RecordVideo` configuration (paths, dimensions, filters).
+- **Service Worker Control** - Added `service_workers` option to `BrowserContextOptions`.
+- **Error Handling** - Added `Error::context()` for richer error reporting.
+
+### Breaking Changes
+
+- **Error Enum**: Added `Error::Context` variant. Exhaustive matches on `Error` will need to handle this new variant.
+- **BrowserContextOptions**: Added new public fields (`record_har`, `service_workers`, etc.). Code constructing this struct via struct literal syntax (e.g. `BrowserContextOptions { ... }`) will break; use `BrowserContextOptions::builder()` instead.
+
+### Fixed
+
+- **Event Deserialization** - Fixed `ProtocolError` when parsing `__dispose__` events by correctly handling optional `params` field (Issue #11)
+
+## [0.8.1] - 2026-01-04
+
+### Added
+
+- **Persistent Contexts & App Mode** - Support for `launchPersistentContext` (Issue #9)
+  - `BrowserType::launch_persistent_context(user_data_dir)`
+  - `BrowserType::launch_persistent_context_with_options(user_data_dir, options)`
+  - Full support for `--app=url` argument for standalone application windows
+  - Persistent user data directories for saving session state (cookies, local storage) across runs
+  - Initial page handling for app mode (automatically tracked in `context.pages()`)
+
+## [0.8.0] - 2025-12-30
+
+### Added
+
+- **Typed Evaluate API** - Generic `Page::evaluate()` method with argument serialization and typed results (PR #8)
+  - `Page::evaluate<T: Serialize, U: DeserializeOwned>(expression, arg)` - Fully typed JavaScript evaluation
+  - `Frame::evaluate<T: Serialize>(expression, arg)` - Frame-level evaluation returning `serde_json::Value`
+  - Argument serialization: Pass any `Serialize` type to JavaScript (primitives, structs, arrays, objects)
+  - Result deserialization: Receive typed results with compile-time validation
+  - Backward compatible: Original `evaluate_expression()` and `evaluate_value()` methods preserved
+  - Comprehensive serialization module with Playwright protocol support
+  - Special value handling: Infinity, NaN, -0, circular references, TypedArrays, Dates, BigInt
+  - Example: `evaluate_typed.rs` demonstrating usage patterns
+
+### Community Credit
+
+- Implementation by @douglasob (Douglas Braga)
+
+## [0.7.2] - 2025-12-24
+
+### Added
+
+- **Storage State Support** - `BrowserContextOptions` now supports `storageState` for session persistence (Issue #6)
+  - `storage_state(StorageState)` - Load cookies and localStorage from inline object
+  - `storage_state_path(String)` - Load storage state from JSON file
+  - New types: `Cookie`, `LocalStorageItem`, `Origin`, `StorageState`
+  - Enables authentication state persistence without re-login
+  - Async file reading with proper error handling
+- `Page::pause()` method for manual debugging (Issue #5)
+  - Opens Playwright Inspector and pauses script execution
+  - Delegates to new `BrowserContext::pause()` method
+
+### Fixed
+
+- Protocol serialization for methods with no arguments (fixed `ProtocolError` on `pause`)
+- **Consistent Test Logging** - Refactored all integration tests to explicitly initialize tracing, ensuring protocol errors are captured and visible (Issue #4)
+
+## [0.7.1] - 2025-12-24
+
+### Added
+
+- **Script Injection** - `BrowserContext.add_init_script()` for context-level script injection before page load
+- **Script Injection** - `Page.add_init_script()` for page-level script injection before page load
+- **Style Injection** - `Page.add_style_tag()` for injecting CSS into pages
+  - `AddStyleTagOptions` struct with builder pattern
+  - Support for inline `content` (CSS string)
+  - Support for external `url` (stylesheet URL)
+  - Support for `path` (load CSS from file)
+  - Returns `ElementHandle` to the injected style tag
+
+## [0.7.0] - 2025-11-16
+
+### Added
+
+- `Browser::is_connected()` method to check if the browser is still connected to the server (Issue #2)
+
+### Changed
+
+- **[BREAKING] Single-crate architecture** - Consolidated `playwright-core` into `playwright-rs` to match all official Playwright implementations (Python, Java, .NET, Node.js)
+  - Merged all code from `playwright-core` into `playwright-rs` under `src/protocol/` and `src/server/`
+  - Removed `playwright-core` crate from workspace
+  - Updated all internal imports from `playwright_core::` to `playwright_rs::`
+  - Server module now marked `#[doc(hidden)]` - exposed only for integration testing
+  - **Migration**: Users of `playwright-rs` v0.6.x should see no API changes. Users of `playwright-core` should switch to `playwright-rs` (see deprecation notice in playwright-core v0.6.2)
+
+### Fixed
+
+- Resolved root cause of Issue #3 by eliminating two-crate complexity that caused workspace detection issues
+- Updated all doctests to use consolidated crate structure
+- Fixed integration test imports to use new module paths
+
+### Internal
+
+- All 248+ tests passing (library + integration + doctests)
+- Maintained backward compatibility for public API
+- Release workflow updated to publish single crate
+
+**Related**: Issue #3, ADR 0003 (Single-Crate Architecture Decision)
+
+## [0.6.1] - 2025-11-15
+
+### Fixed
+
+- **[Critical] Build script workspace detection** - Fixed issue #3 where `build.rs` failed to detect the correct workspace root when playwright-core is used as a crates.io dependency
+  - Implemented robust three-tier detection strategy:
+    1. Use `CARGO_WORKSPACE_DIR` (Rust 1.73+) to detect dependent project's workspace
+    2. Walk up directory tree to find `Cargo.toml` with `[workspace]`
+    3. Fallback to platform-specific cache directory (matches playwright-python behavior)
+  - This fix unblocks usage of playwright-rust in downstream projects like Folio
+  - Drivers now download to the correct location in all scenarios (workspace development, crates.io dependency, non-workspace projects)
+
+## [0.6.0] - 2025-11-14
+
+**First public release** of `playwright-rs` - Production-ready Rust bindings for Microsoft Playwright.
+
+### Platform Support
+
+- **Cross-platform**: Full support for Windows, macOS, and Linux
+- **Cross-browser**: Chromium, Firefox, and WebKit
+- **Windows-specific**: Platform-specific lifecycle management with Drop handler for proper stdio cleanup
+- **CI-ready**: Automated cross-platform testing on all three operating systems
+
+### Browser & Page Management
+
+- Launch browsers (Chromium, Firefox, WebKit) in headless or headed mode
+- Create isolated browser contexts
+- Page lifecycle management (create, navigate, close)
+- Automatic resource cleanup
+
+### Page Navigation & Content
+
+- Navigate to URLs with `page.goto()` (returns `Option<Response>` - `None` for data URLs and `about:blank`)
+- Reload pages, get page title and URL
+- Response status and metadata access
+
+### Element Location & Interaction
+
+- **Locators** with CSS selectors and auto-waiting
+- **Locator chaining**: `first()`, `last()`, `nth()`, nested locators
+- **Element queries**: `text_content()`, `inner_text()`, `inner_html()`, `get_attribute()`, `input_value()`
+- **State queries**: `is_visible()`, `is_enabled()`, `is_checked()`, `is_editable()`
+- **Actions**: `click()`, `dblclick()`, `fill()`, `clear()`, `press()`, `check()`, `uncheck()`, `hover()`
+- **Advanced actions**: `select_option()` (by value/label/index), `set_input_files()`
+- **Checkbox convenience**: `set_checked(bool)` for boolean-based check/uncheck
+
+### Action Options (Builder Pattern)
+
+- **Click options**: button, modifiers, position, force, trial, timeout, delay
+- **Fill options**: force, timeout
+- **Press options**: delay, timeout
+- **Check options**: force, position, timeout, trial
+- **Hover options**: force, modifiers, position, timeout, trial
+- **Select options**: force, timeout
+
+### Low-Level Input Control
+
+- **Keyboard API**: `type_text()`, `press()`, `down()`, `up()`, `insert_text()` with delay options
+- **Mouse API**: `move_to()`, `click()`, `dblclick()`, `down()`, `up()`, `wheel()` with button, click_count, delay, steps options
+
+### Screenshots
+
+- Page screenshots with `page.screenshot()`
+- Element screenshots with `locator.screenshot()`
+- **Screenshot options**: PNG/JPEG format, quality control, full-page, clip region, omit background
+- Save to file or get bytes
+
+### Assertions with Auto-Retry
+
+- **Visibility**: `expect(locator).to_be_visible()`, `to_be_hidden()`
+- **Text**: `to_have_text()`, `to_contain_text()` with regex pattern support
+- **Value**: `to_have_value()` with regex pattern support
+- **State**: `to_be_enabled()`, `to_be_disabled()`, `to_be_checked()`, `to_be_unchecked()`, `to_be_editable()`, `to_be_focused()`
+- **Negation**: `.not()` for all assertions
+- **Custom timeouts**: `.with_timeout()` configuration
+- Default 5-second timeout with 100ms polling interval
+
+### Network Interception
+
+- **Route registration**: `page.route()` with async closure handlers
+- **Request blocking**: `route.abort()`
+- **Request modification**: `route.continue_()` with header/method/postData overrides
+- **Response mocking**: `route.fulfill()` with custom status, headers, body (works for API/fetch requests)
+- **JSON helpers**: Automatic serialization with `.json()`
+- **Pattern matching**: Glob patterns (`**/*.png`, `**/*`, etc.)
+- **Request inspection**: Access URL, method, headers in route handlers
+- **Cross-browser**: Works on Chromium, Firefox, WebKit
+
+### Event Handling
+
+- **Downloads**: `page.on_download()` with `download.save_as()` and metadata access
+- **Dialogs**: `page.on_dialog()` for alert/confirm/prompt with `accept()`/`dismiss()`
+
+### Advanced Features
+
+- **Browser context options**: viewport, user agent, locale, timezone, geolocation, mobile emulation, JavaScript control, offline mode
+- **File uploads**: Basic PathBuf upload and advanced FilePayload with name/mimeType/buffer control
+- **JavaScript evaluation**: `page.evaluate_value()` with return values
+
+### Developer Experience
+
+- **Comprehensive documentation**: 100% rustdoc coverage with examples, error docs, and Playwright links
+- **cargo-nextest integration**: Faster test execution
+- **Performance benchmarks**: Criterion.rs suite for regression detection
+- **Cross-platform CI**: Tests run on Linux, macOS, and Windows
+
+### Performance Optimizations
+
+- **GUID storage**: Arc<str> optimization (5.5x faster clones, 2.0x faster lookups)
+- **Message transport**: Chunked reading for large messages (>32KB) reduces memory pressure
+- **Test suite**: 68% reduction in test count through combining related tests
+
+### Known Limitations
+
+- **route.fulfill() body transmission**: Response bodies are not transmitted to browsers due to a Playwright server limitation (tested with Playwright 1.56.1). Workaround: Mock at HTTP server level or wait for Playwright server update. The Rust implementation is correct and will work when Playwright fixes this issue.
+
+### Migration Notes
+
+- Navigation methods (`goto()`, `reload()`) return `Option<Response>` instead of `Response`
+  - Playwright returns null for data URLs and `about:blank` (valid behavior, not an error)
+  - Migration: `page.goto("https://example.com").await?.expect("response")` or use `if let Some(response) = page.goto(...).await? { ... }`
+
+[Unreleased]: https://github.com/padamson/playwright-rust/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/padamson/playwright-rust/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/padamson/playwright-rust/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/padamson/playwright-rust/compare/v0.18.1...v0.19.0
+[0.18.1]: https://github.com/padamson/playwright-rust/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/padamson/playwright-rust/compare/v0.17.0...v0.18.0
+[0.17.0]: https://github.com/padamson/playwright-rust/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/padamson/playwright-rust/compare/v0.15.1...v0.16.0
+[0.15.1]: https://github.com/padamson/playwright-rust/compare/v0.15.0...v0.15.1
+[0.15.0]: https://github.com/padamson/playwright-rust/compare/v0.14.1...v0.15.0
+[0.14.1]: https://github.com/padamson/playwright-rust/compare/v0.14.0...v0.14.1
+[0.14.0]: https://github.com/padamson/playwright-rust/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/padamson/playwright-rust/compare/v0.12.3...v0.13.0
+[0.12.3]: https://github.com/padamson/playwright-rust/compare/v0.12.2...v0.12.3
+[0.12.2]: https://github.com/padamson/playwright-rust/compare/v0.12.1...v0.12.2
+[0.12.1]: https://github.com/padamson/playwright-rust/compare/v0.12.0...v0.12.1
+[0.12.0]: https://github.com/padamson/playwright-rust/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/padamson/playwright-rust/compare/v0.10.0...v0.11.0
+[0.10.0]: https://github.com/padamson/playwright-rust/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/padamson/playwright-rust/compare/v0.8.7...v0.9.0
+[0.8.7]: https://github.com/padamson/playwright-rust/compare/v0.8.6...v0.8.7
+[0.8.6]: https://github.com/padamson/playwright-rust/compare/v0.8.5...v0.8.6
+[0.8.5]: https://github.com/padamson/playwright-rust/compare/v0.8.4...v0.8.5
+[0.8.4]: https://github.com/padamson/playwright-rust/compare/v0.8.3...v0.8.4
+[0.8.3]: https://github.com/padamson/playwright-rust/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/padamson/playwright-rust/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/padamson/playwright-rust/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/padamson/playwright-rust/compare/v0.7.2...v0.8.0
+[0.7.2]: https://github.com/padamson/playwright-rust/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/padamson/playwright-rust/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/padamson/playwright-rust/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/padamson/playwright-rust/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/padamson/playwright-rust/releases/tag/v0.6.0

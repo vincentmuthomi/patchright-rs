@@ -1,0 +1,163 @@
+[package]
+name = "patchright-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Patchright for Rust: undetected Playwright (Chromium) bindings built on playwright-rust"
+keywords = ["patchright", "playwright", "browser", "automation", "stealth"]
+categories = ["development-tools::testing", "web-programming"]
+readme = "../../README.md"
+
+[lib]
+name = "patchright_rs"
+doctest = false  # Disable doc-tests by default (run with: cargo test --doc)
+
+[features]
+default = ["native-tls", "macros", "ring", "route-service"]
+native-tls = ["tokio-tungstenite/native-tls"]
+rustls-tls-native-roots = ["dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
+rustls-tls-webpki-roots = ["dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
+ring = ["rustls?/ring"]
+aws-lc = ["rustls?/aws-lc-rs"]
+screenshot-diff = ["dep:image"]
+# `page.route_service(..)` / `context.route_service(..)`: fulfill matching
+# requests from an in-process tower `Service` (an axum `Router`, tower-http's
+# `ServeDir`, ...) with no socket. On by default; the cost is four small
+# pure-Rust crates, all already in the dependency graph's audit set.
+route-service = ["dep:http", "dep:http-body", "dep:http-body-util", "dep:tower"]
+macros = ["dep:playwright-rs-macros"]
+# Re-exports the trace-zip parser as `playwright_rs::trace`, so a project
+# that reads its own traces never picks a second version. Off by default:
+# writing traces needs none of it, and it pulls the zip and deflate stack.
+trace = ["dep:playwright-rs-trace"]
+cli = [
+    "dep:clap",
+    "dep:ureq",
+    "dep:rustls",
+    "dep:zip",
+    "dep:flate2",
+    "dep:tar",
+    "dep:sha2",
+]
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"
+tracing = "0.1"
+parking_lot = "0.13"
+# Without simd-unsafe: general_purpose::STANDARD never calls the SIMD kernels.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+bytes = "1.11.1"
+regex = "1.10"
+tokio-tungstenite = { version = "0.30" }
+futures-util = "0.3"
+url = "2.5"
+dirs = "7"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
+playwright-rs-macros = { version = "0.1.2", path = "../playwright-rs-macros", optional = true }
+playwright-rs-trace = { version = "0.3.0", path = "../playwright-rs-trace", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+ureq = { version = "3.3.0", optional = true, default-features = false, features = [
+    "gzip",
+    "rustls-no-provider",
+    "rustls-webpki-roots",
+] }
+rustls = { version = "0.23", optional = true, default-features = false }
+zip = { version = "9", optional = true, default-features = false, features = ["deflate"] }
+# .tar.gz handling for the assembled driver (npm playwright-core tarball +
+# the Node dist archive on non-Windows) — see ADR 0006.
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+sha2 = { version = "0.11", optional = true, default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Property-based testing: supplies its own inputs rather than only the ones
+# someone thought to write down, and shrinks a failure to a minimal
+# counterexample. Covers the space between the example tests, which mutation
+# testing cannot: it perturbs the code and reuses the existing inputs.
+proptest = "1"
+anyhow = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = ["fs"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+urlencoding = "2"
+# 3.15 for TempDir::keep, which the sigint harness uses to hold onto its
+# captures only when the test fails.
+tempfile = "3.15"
+# Also a dev-dependency, so the tracing test reads its trace back whether
+# or not the `trace` feature is on.
+playwright-rs-trace = { version = "0.3.0", path = "../playwright-rs-trace" }
+
+[target.'cfg(windows)'.dev-dependencies]
+winapi = { version = "0.3", features = ["processthreadsapi", "psapi", "minwindef"] }
+
+[lints.rust]
+# A public type with no public path gets no page on docs.rs.
+unnameable_types = "warn"
+
+[build-dependencies]
+# The default assembly location is the user cache (ADR 0007); the same
+# crate resolves it at runtime and in the cli, so the three agree.
+dirs = "7"
+# ureq (~5 transitive deps) covers the one blocking HTTP GET in
+# build.rs without dragging in the hyper/tower/h2 stack reqwest
+# would.
+ureq = { version = "3.3.0", default-features = false, features = [
+    "gzip",
+    "rustls-no-provider",
+    "rustls-webpki-roots",
+] }
+rustls = { version = "0.23", default-features = false }
+# deflate only: the Windows Node dist archive is standard-deflate, so we
+# skip zip's default codec set (aes-crypto/bzip2/zstd/lzma/...) — smaller
+# tree and no pull on the encryption stack. Mirrors playwright-rs-trace.
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# .tar.gz for the npm playwright-core tarball + the non-Windows Node dist
+# archive (the driver is assembled from those two artifacts — ADR 0006).
+flate2 = "1"
+tar = "0.4"
+# Both downloads are checked against digests pinned in driver_urls.rs before
+# they are unpacked; base64 renders npm's `sha512-` integrity form.
+sha2 = { version = "0.11", default-features = false }
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+
+[package.metadata.docs.rs]
+# Pin nightly to avoid generic-array 0.14 breakage (doc_auto_cfg removed in Rust 1.92)
+# See: https://github.com/rust-lang/rust/pull/138907
+toolchain = "nightly-2025-05-01"
+
+[[bin]]
+name = "patchright-rs"
+path = "src/bin/playwright_rs.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "visual_regression"
+required-features = ["screenshot-diff"]
+
+[[bench]]
+name = "browser_operations"
+harness = false
+
+[[bench]]
+name = "page_operations"
+harness = false
+
+[[bench]]
+name = "guid_operations"
+harness = false

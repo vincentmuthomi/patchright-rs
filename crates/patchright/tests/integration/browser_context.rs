@@ -1,0 +1,1309 @@
+use patchright_rs::protocol::{
+    BrowserContextOptions, BrowserType, Geolocation, Playwright, Viewport,
+};
+use std::env;
+
+#[tokio::test]
+async fn test_new_context() {
+    let (_pw, browser, context) = crate::common::setup_context().await;
+
+    tracing::info!("✓ Context created");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_multiple_contexts() {
+    let (_pw, browser, context1) = crate::common::setup_context().await;
+
+    // Create a second context
+    let context2 = browser
+        .new_context()
+        .await
+        .expect("Failed to create context 2");
+
+    tracing::info!("✓ Created 2 contexts");
+
+    // Cleanup
+    context1.close().await.expect("Failed to close context 1");
+    context2.close().await.expect("Failed to close context 2");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_with_viewport() {
+    crate::common::init_tracing();
+    // Test creating context with custom viewport
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder()
+        .viewport(Viewport {
+            width: 1024,
+            height: 768,
+        })
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with viewport");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Verify viewport dimensions via JavaScript
+    let width = page
+        .evaluate_value("window.innerWidth")
+        .await
+        .expect("Failed to evaluate width");
+    assert_eq!(width.parse::<i32>().unwrap(), 1024);
+
+    let height = page
+        .evaluate_value("window.innerHeight")
+        .await
+        .expect("Failed to evaluate height");
+    assert_eq!(height.parse::<i32>().unwrap(), 768);
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_with_user_agent() {
+    crate::common::init_tracing();
+    // Test creating context with custom user agent
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let custom_ua = "CustomBot/1.0";
+    let options = BrowserContextOptions::builder()
+        .user_agent(custom_ua.to_string())
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with user agent");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Verify user agent via JavaScript
+    let ua = page
+        .evaluate_value("navigator.userAgent")
+        .await
+        .expect("Failed to evaluate user agent");
+    assert_eq!(ua, custom_ua);
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_with_locale() {
+    crate::common::init_tracing();
+    // Test creating context with custom locale
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder()
+        .locale("fr-FR".to_string())
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with locale");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Verify locale via JavaScript
+    let locale = page
+        .evaluate_value("navigator.language")
+        .await
+        .expect("Failed to evaluate locale");
+    assert_eq!(locale, "fr-FR");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_with_timezone() {
+    crate::common::init_tracing();
+    // Test creating context with custom timezone
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder()
+        .timezone_id("America/New_York".to_string())
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with timezone");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Verify timezone via JavaScript
+    let tz = page
+        .evaluate_value("Intl.DateTimeFormat().resolvedOptions().timeZone")
+        .await
+        .expect("Failed to evaluate timezone");
+    assert_eq!(tz, "America/New_York");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_with_geolocation() {
+    crate::common::init_tracing();
+    // Test creating context with geolocation
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder()
+        .geolocation(Geolocation {
+            latitude: 48.8584, // Paris
+            longitude: 2.2945,
+            accuracy: Some(100.0),
+        })
+        .permissions(vec!["geolocation".to_string()])
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with geolocation");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Verify geolocation permission is granted by checking navigator.permissions
+    // (actual geolocation requires page navigation which may be complex in tests)
+    // Just verify the context was created successfully with geolocation options
+    let has_geolocation = page
+        .evaluate_value("'geolocation' in navigator")
+        .await
+        .expect("Failed to check geolocation");
+    assert_eq!(has_geolocation, "true");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_offline_mode() {
+    crate::common::init_tracing();
+    // Test creating context in offline mode
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder().offline(true).build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context in offline mode");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Try to navigate to a real website - should fail due to offline mode
+    let result = page.goto("https://example.com", None).await;
+    assert!(result.is_err(), "Navigation should fail in offline mode");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_combined_options() {
+    crate::common::init_tracing();
+    // Test creating context with multiple options combined
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder()
+        .viewport(Viewport {
+            width: 800,
+            height: 600,
+        })
+        .user_agent("CustomBot/2.0".to_string())
+        .locale("de-DE".to_string())
+        .timezone_id("Europe/Berlin".to_string())
+        .color_scheme("dark".to_string())
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with combined options");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Verify viewport
+    let width = page
+        .evaluate_value("window.innerWidth")
+        .await
+        .expect("Failed to evaluate width");
+    assert_eq!(width.parse::<i32>().unwrap(), 800);
+
+    // Verify user agent
+    let ua = page
+        .evaluate_value("navigator.userAgent")
+        .await
+        .expect("Failed to evaluate user agent");
+    assert_eq!(ua, "CustomBot/2.0");
+
+    // Verify locale
+    let locale = page
+        .evaluate_value("navigator.language")
+        .await
+        .expect("Failed to evaluate locale");
+    assert_eq!(locale, "de-DE");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_no_viewport() {
+    crate::common::init_tracing();
+    // Test creating context with no viewport (null viewport)
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder().no_viewport(true).build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with no viewport");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // With no viewport, dimensions should match the browser window
+    // This is typically larger than the default 1280x720
+    let width = page
+        .evaluate_value("window.innerWidth")
+        .await
+        .expect("Failed to evaluate width");
+
+    // Just verify we got a reasonable width (should be different from default 1280)
+    let width_val = width.parse::<i32>().unwrap();
+    assert!(width_val > 0, "Width should be positive");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "launches Firefox and WebKit; runs in CI's --run-ignored lane"]
+async fn test_context_cross_browser_options() {
+    crate::common::init_tracing();
+    // Verify context options work across Chromium, Firefox, and WebKit
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+
+    for browser_name in &["chromium", "firefox", "webkit"] {
+        let browser = match *browser_name {
+            "chromium" => playwright.chromium().launch().await.unwrap(),
+            "firefox" => playwright.firefox().launch().await.unwrap(),
+            "webkit" => playwright.webkit().launch().await.unwrap(),
+            _ => unreachable!(),
+        };
+
+        let options = BrowserContextOptions::builder()
+            .viewport(Viewport {
+                width: 640,
+                height: 480,
+            })
+            .locale("en-US".to_string())
+            .build();
+
+        let context = browser
+            .new_context_with_options(options)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to create context in {}: {}", browser_name, e));
+
+        let page = context
+            .new_page()
+            .await
+            .unwrap_or_else(|e| panic!("Failed to create page in {}: {}", browser_name, e));
+
+        // Verify viewport works in all browsers
+        let width = page
+            .evaluate_value("window.innerWidth")
+            .await
+            .unwrap_or_else(|e| panic!("Failed to evaluate in {}: {}", browser_name, e));
+        assert_eq!(width.parse::<i32>().unwrap(), 640);
+
+        context.close().await.unwrap();
+        browser.close().await.unwrap();
+    }
+}
+
+// ============================================================================
+// StorageState Tests (Issue #6)
+// ============================================================================
+
+#[tokio::test]
+async fn test_context_with_storage_state_inline() {
+    use patchright_rs::protocol::{Cookie, LocalStorageItem, Origin, StorageState};
+    crate::common::init_tracing();
+
+    // Test creating context with inline storage state
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    // Create storage state with cookies and localStorage
+    let storage_state = StorageState::default()
+        .cookies(vec![
+            Cookie::new("test_cookie", "test_value")
+                .domain(".example.com")
+                .same_site("Lax"),
+        ])
+        .origins(vec![Origin::new(
+            "https://example.com",
+            vec![LocalStorageItem::new("test_key", "test_storage_value")],
+        )]);
+
+    let options = BrowserContextOptions::builder()
+        .storage_state(storage_state)
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with storage state");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Navigate to example.com to verify storage state was loaded
+    page.goto("https://example.com", None)
+        .await
+        .expect("Failed to navigate");
+
+    // Verify cookie was set
+    let cookie_value = page
+        .evaluate_value("document.cookie")
+        .await
+        .expect("Failed to evaluate cookie");
+    assert!(
+        cookie_value.contains("test_cookie=test_value"),
+        "Cookie should be set"
+    );
+
+    // Verify localStorage was set
+    let storage_value = page
+        .evaluate_value("localStorage.getItem('test_key')")
+        .await
+        .expect("Failed to evaluate localStorage");
+    assert_eq!(storage_value, "test_storage_value");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+async fn test_context_with_storage_state_from_file() {
+    crate::common::init_tracing();
+
+    // Test creating context with storage state from file
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    // Create a temporary storage state file
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let storage_file = temp_dir.path().join("test_storage_state.json");
+
+    // Write storage state to file
+    let storage_json = r#"{
+        "cookies": [{
+            "name": "file_cookie",
+            "value": "file_value",
+            "domain": ".example.com",
+            "path": "/",
+            "expires": -1,
+            "httpOnly": false,
+            "secure": false,
+            "sameSite": "Lax"
+        }],
+        "origins": [{
+            "origin": "https://example.com",
+            "localStorage": [{
+                "name": "file_key",
+                "value": "file_storage_value"
+            }]
+        }]
+    }"#;
+
+    std::fs::write(&storage_file, storage_json).expect("Failed to write storage file");
+
+    let options = BrowserContextOptions::builder()
+        .storage_state_path(storage_file.to_str().unwrap().to_string())
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with storage state from file");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Navigate to example.com to verify storage state was loaded
+    page.goto("https://example.com", None)
+        .await
+        .expect("Failed to navigate");
+
+    // Verify cookie was set
+    let cookie_value = page
+        .evaluate_value("document.cookie")
+        .await
+        .expect("Failed to evaluate cookie");
+    assert!(
+        cookie_value.contains("file_cookie=file_value"),
+        "Cookie from file should be set"
+    );
+
+    // Verify localStorage was set
+    let storage_value = page
+        .evaluate_value("localStorage.getItem('file_key')")
+        .await
+        .expect("Failed to evaluate localStorage");
+    assert_eq!(storage_value, "file_storage_value");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+
+    // Cleanup
+}
+
+#[tokio::test]
+async fn test_context_storage_state_invalid_file() {
+    crate::common::init_tracing();
+
+    // Test that invalid storage state file path returns error
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let options = BrowserContextOptions::builder()
+        .storage_state_path("/nonexistent/path/to/storage.json".to_string())
+        .build();
+
+    let result = browser.new_context_with_options(options).await;
+
+    // Should fail with error about missing file
+    assert!(
+        result.is_err(),
+        "Creating context with non-existent storage file should fail"
+    );
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "launches Firefox and WebKit; runs in CI's --run-ignored lane"]
+async fn test_context_storage_state_cross_browser() {
+    use patchright_rs::protocol::{Cookie, LocalStorageItem, Origin, StorageState};
+    crate::common::init_tracing();
+
+    // Verify storage state works across Chromium, Firefox, and WebKit
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+
+    for browser_name in &["chromium", "firefox", "webkit"] {
+        let browser = match *browser_name {
+            "chromium" => playwright.chromium().launch().await.unwrap(),
+            "firefox" => playwright.firefox().launch().await.unwrap(),
+            "webkit" => playwright.webkit().launch().await.unwrap(),
+            _ => unreachable!(),
+        };
+
+        // Create storage state with cookies
+        let storage_state = StorageState::default()
+            .cookies(vec![
+                Cookie::new("browser_test_cookie", format!("{}_value", browser_name))
+                    .domain(".example.com")
+                    .same_site("Lax"),
+            ])
+            .origins(vec![Origin::new(
+                "https://example.com",
+                vec![LocalStorageItem::new(
+                    "browser_key",
+                    format!("{}_storage", browser_name),
+                )],
+            )]);
+
+        let options = BrowserContextOptions::builder()
+            .storage_state(storage_state)
+            .build();
+
+        let context = browser
+            .new_context_with_options(options)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to create context with storage state in {}: {}",
+                    browser_name, e
+                )
+            });
+
+        let page = context
+            .new_page()
+            .await
+            .unwrap_or_else(|e| panic!("Failed to create page in {}: {}", browser_name, e));
+
+        // Navigate to example.com
+        page.goto("https://example.com", None)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to navigate in {}: {}", browser_name, e));
+
+        // Verify cookie was set
+        let cookie_value = page
+            .evaluate_value("document.cookie")
+            .await
+            .unwrap_or_else(|e| panic!("Failed to evaluate cookie in {}: {}", browser_name, e));
+        assert!(
+            cookie_value.contains(&format!("browser_test_cookie={}_value", browser_name)),
+            "Cookie should be set in {}",
+            browser_name
+        );
+
+        context.close().await.unwrap();
+        browser.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_context_storage_state_empty() {
+    use patchright_rs::protocol::StorageState;
+    crate::common::init_tracing();
+
+    // Test creating context with empty storage state (should work fine)
+    let playwright = Playwright::launch()
+        .await
+        .expect("Failed to launch Playwright");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("Failed to launch browser");
+
+    let storage_state = StorageState::default();
+
+    let options = BrowserContextOptions::builder()
+        .storage_state(storage_state)
+        .build();
+
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("Failed to create context with empty storage state");
+
+    let page = context.new_page().await.expect("Failed to create page");
+
+    // Should work fine with no cookies/storage
+    page.goto("https://example.com", None)
+        .await
+        .expect("Failed to navigate");
+
+    context.close().await.expect("Failed to close context");
+    browser.close().await.expect("Failed to close browser");
+}
+
+// Tests for BrowserContext.pages() and BrowserContext.browser() methods
+//
+// This test module verifies:
+// - context.pages() returns empty vec initially
+// - context.pages() includes pages after new_page()
+// - context.pages() includes initial page in persistent context with --app
+// - context.browser() returns Browser for regular contexts
+// - context.browser() returns None for persistent contexts (Playwright behavior)
+// - Cross-browser compatibility
+
+#[tokio::test]
+async fn test_context_pages_empty_initially() {
+    let (_pw, browser, context) = crate::common::setup_context().await;
+
+    // Initially, context should have no pages
+    let pages = context.pages();
+    assert_eq!(pages.len(), 0, "New context should have no pages");
+
+    context.close().await.unwrap();
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_context_pages_includes_new_page() {
+    let (_pw, browser, context) = crate::common::setup_context().await;
+
+    // Create a page
+    let page1 = context.new_page().await.unwrap();
+
+    // Context should now include the page
+    let pages = context.pages();
+    assert_eq!(pages.len(), 1, "Context should have 1 page");
+
+    // Verify it's the same page (by URL initially at about:blank)
+    assert_eq!(pages[0].url(), page1.url());
+
+    // Create another page
+    let _page2 = context.new_page().await.unwrap();
+
+    // Context should now include both pages
+    let pages = context.pages();
+    assert_eq!(pages.len(), 2, "Context should have 2 pages");
+
+    context.close().await.unwrap();
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_context_pages_includes_initial_app_mode_page() {
+    let playwright = Playwright::launch().await.unwrap();
+    let chromium = playwright.chromium();
+
+    // Create temp user data dir
+    let user_data_dir = env::temp_dir()
+        .join(format!(
+            "pw-rust-test-app-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Launch persistent context with --app mode
+    let options = patchright_rs::protocol::BrowserContextOptions::builder()
+        .headless(true)
+        .args(vec!["--app=https://example.com".to_string()])
+        .build();
+
+    let context = chromium
+        .launch_persistent_context_with_options(&user_data_dir, options)
+        .await
+        .unwrap();
+
+    // In app mode, Playwright creates an initial page automatically
+    let pages = context.pages();
+    assert!(
+        !pages.is_empty(),
+        "Persistent context with --app should have initial page"
+    );
+
+    // The initial page should be navigating to or at the app URL
+    // (may still be loading, so just check it exists)
+    let initial_page = &pages[0];
+    assert!(
+        !initial_page.url().is_empty(),
+        "Initial app mode page should have a URL"
+    );
+
+    context.close().await.unwrap();
+
+    // Cleanup temp directory
+    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
+}
+
+#[tokio::test]
+async fn test_context_browser_returns_browser_for_regular_context() {
+    let (_pw, browser, context) = crate::common::setup_context().await;
+
+    // Regular context should return the browser
+    let context_browser = context.browser();
+    assert!(
+        context_browser.is_some(),
+        "Regular context should return Some(Browser)"
+    );
+
+    // Verify it's the same browser by checking name and version
+    let ctx_browser = context_browser.unwrap();
+    assert_eq!(ctx_browser.name(), browser.name());
+    assert_eq!(ctx_browser.version(), browser.version());
+
+    context.close().await.unwrap();
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_context_browser_returns_browser_for_persistent_context() {
+    let playwright = Playwright::launch().await.unwrap();
+    let chromium = playwright.chromium();
+
+    // Create temp user data dir
+    let user_data_dir = env::temp_dir()
+        .join(format!(
+            "pw-rust-test-persist-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    // Launch persistent context
+    let options = patchright_rs::protocol::BrowserContextOptions::builder()
+        .headless(true)
+        .build();
+
+    let context = chromium
+        .launch_persistent_context_with_options(&user_data_dir, options)
+        .await
+        .unwrap();
+
+    // Persistent context should ALSO return the browser (Playwright behavior)
+    // Only Android/Electron contexts return None
+    let context_browser = context.browser();
+    assert!(
+        context_browser.is_some(),
+        "Persistent context should return Some(Browser)"
+    );
+
+    // Verify it's a valid browser
+    let browser = context_browser.unwrap();
+    assert_eq!(browser.name(), "chromium");
+    assert!(!browser.version().is_empty());
+
+    context.close().await.unwrap();
+
+    // Cleanup temp directory
+    let _ = tokio::fs::remove_dir_all(&user_data_dir).await;
+}
+
+#[tokio::test]
+#[ignore = "launches Firefox and WebKit; runs in CI's --run-ignored lane"]
+async fn test_context_pages_cross_browser() {
+    let playwright = Playwright::launch().await.unwrap();
+
+    // Test on all three browsers
+    let browser_types = vec![
+        ("chromium", playwright.chromium()),
+        ("firefox", playwright.firefox()),
+        ("webkit", playwright.webkit()),
+    ];
+
+    for (name, browser_type) in browser_types {
+        println!("Testing context.pages() on {}", name);
+
+        let browser = browser_type.launch().await.unwrap();
+        let context = browser.new_context().await.unwrap();
+
+        // Empty initially
+        let pages = context.pages();
+        assert_eq!(pages.len(), 0, "New {} context should have no pages", name);
+
+        // Create page
+        let _page = context.new_page().await.unwrap();
+
+        // Should include page
+        let pages = context.pages();
+        assert_eq!(pages.len(), 1, "{} context should have 1 page", name);
+
+        context.close().await.unwrap();
+        browser.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_browser_context_is_closed() {
+    let (_pw, browser, context) = crate::common::setup_context().await;
+    assert!(
+        !context.is_closed(),
+        "Newly created context should not be closed"
+    );
+    context.close().await.expect("Failed to close context");
+    assert!(
+        context.is_closed(),
+        "Context should be closed after close()"
+    );
+    browser.close().await.expect("Failed to close browser");
+}
+
+// One engine per test (rather than all three in a single test) so each browser
+// launch gets its own timeout budget to avoid timeouts on slow stress runs.
+async fn assert_context_browser(browser_type: &BrowserType, name: &str) {
+    let browser = browser_type.launch().await.unwrap();
+    let context = browser.new_context().await.unwrap();
+
+    let context_browser = context.browser();
+    assert!(
+        context_browser.is_some(),
+        "{name} context should return Some(Browser)"
+    );
+    let ctx_browser = context_browser.unwrap();
+    assert_eq!(ctx_browser.name(), browser.name());
+    assert_eq!(ctx_browser.version(), browser.version());
+
+    context.close().await.unwrap();
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_context_browser_chromium() {
+    let pw = Playwright::launch().await.unwrap();
+    assert_context_browser(pw.chromium(), "chromium").await;
+}
+
+#[tokio::test]
+#[ignore = "launches Firefox; runs in CI's --run-ignored lane"]
+async fn test_context_browser_firefox() {
+    let pw = Playwright::launch().await.unwrap();
+    assert_context_browser(pw.firefox(), "firefox").await;
+}
+
+#[tokio::test]
+#[ignore = "launches WebKit; runs in CI's --run-ignored lane"]
+async fn test_context_browser_webkit() {
+    let pw = Playwright::launch().await.unwrap();
+    assert_context_browser(pw.webkit(), "webkit").await;
+}
+
+/// HTTP credentials are matched per request origin, so a context can hold
+/// several and each request gets the one for its own host.
+#[tokio::test]
+async fn http_credentials_authenticate_by_origin() -> Result<(), Box<dyn std::error::Error>> {
+    use patchright_rs::protocol::{BrowserContextOptions, HttpCredentials};
+
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, _) = crate::common::setup().await;
+
+    // Without credentials the server challenges.
+    let bare = browser.new_context().await?;
+    let page = bare.new_page().await?;
+    let denied = page
+        .goto(&format!("{}/protected", server.url()), None)
+        .await?
+        .expect("a response");
+    assert_eq!(denied.status(), 401);
+    bare.close().await?;
+
+    // With credentials for this origin, the same request succeeds.
+    let options = BrowserContextOptions::builder()
+        .http_credentials(vec![
+            // Wrong credentials first, for an origin this test never visits:
+            // picking by list order rather than by origin fails the request.
+            HttpCredentials::new("wrong", "wrong").origin("https://elsewhere.test"),
+            HttpCredentials::new("user", "secret").origin(server.url()),
+        ])
+        .build();
+    let context = browser.new_context_with_options(options).await?;
+    let page = context.new_page().await?;
+    let allowed = page
+        .goto(&format!("{}/protected", server.url()), None)
+        .await?
+        .expect("a response");
+    assert_eq!(allowed.status(), 200);
+    patchright_rs::expect(page.locator("h1"))
+        .to_have_text("secret area")
+        .await?;
+
+    context.close().await?;
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+/// `set_http_credentials` swaps them on a live context.
+#[tokio::test]
+async fn set_http_credentials_applies_to_later_requests() -> Result<(), Box<dyn std::error::Error>>
+{
+    use patchright_rs::protocol::HttpCredentials;
+
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, context) = crate::common::setup_context().await;
+    let page = context.new_page().await?;
+
+    let denied = page
+        .goto(&format!("{}/protected", server.url()), None)
+        .await?
+        .expect("a response");
+    assert_eq!(denied.status(), 401);
+
+    context
+        .set_http_credentials(vec![HttpCredentials::new("user", "secret")])
+        .await?;
+    let allowed = page
+        .goto(&format!("{}/protected", server.url()), None)
+        .await?
+        .expect("a response");
+    assert_eq!(allowed.status(), 200);
+
+    context.close().await?;
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+/// Reads `#out` after `html` loads in a context built from `options`.
+async fn script_output(
+    browser: &patchright_rs::protocol::Browser,
+    options: BrowserContextOptions,
+    html: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let context = browser.new_context_with_options(options).await?;
+    let page = context.new_page().await?;
+    page.set_content(html, None).await?;
+    let text = page.locator("#out").text_content().await?;
+    context.close().await?;
+    Ok(text)
+}
+
+#[tokio::test]
+async fn javascript_enabled_false_stops_page_script() -> Result<(), Box<dyn std::error::Error>> {
+    let (_pw, browser, _) = crate::common::setup().await;
+    let html = "<p id='out'>static</p>\
+                <script>document.getElementById('out').textContent = 'script ran'</script>";
+
+    let default = script_output(&browser, BrowserContextOptions::builder().build(), html).await?;
+    assert_eq!(default.as_deref(), Some("script ran"));
+    let disabled = BrowserContextOptions::builder()
+        .javascript_enabled(false)
+        .build();
+    assert_eq!(
+        script_output(&browser, disabled, html).await?.as_deref(),
+        Some("static")
+    );
+
+    browser.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bypass_csp_runs_a_script_the_page_policy_blocks() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_pw, browser, _) = crate::common::setup().await;
+    let html = "<meta http-equiv='Content-Security-Policy' content=\"script-src 'none'\">\
+                <p id='out'>static</p>\
+                <script>document.getElementById('out').textContent = 'script ran'</script>";
+
+    let default = script_output(&browser, BrowserContextOptions::builder().build(), html).await?;
+    assert_eq!(default.as_deref(), Some("static"));
+    let bypassing = BrowserContextOptions::builder().bypass_csp(true).build();
+    assert_eq!(
+        script_output(&browser, bypassing, html).await?.as_deref(),
+        Some("script ran")
+    );
+
+    browser.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn base_url_resolves_a_relative_goto() -> Result<(), Box<dyn std::error::Error>> {
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, _) = crate::common::setup().await;
+
+    let options = BrowserContextOptions::builder()
+        .base_url(server.url())
+        .build();
+    let context = browser.new_context_with_options(options).await?;
+    let page = context.new_page().await?;
+    let response = page.goto("/echo-headers", None).await?.expect("a response");
+    assert_eq!(response.status(), 200);
+    assert_eq!(page.url(), format!("{}/echo-headers", server.url()));
+
+    context.close().await?;
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn extra_http_headers_reach_the_server() -> Result<(), Box<dyn std::error::Error>> {
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, _) = crate::common::setup().await;
+
+    let options = BrowserContextOptions::builder()
+        .extra_http_headers(std::collections::HashMap::from([(
+            "X-From-Context".to_string(),
+            "yes".to_string(),
+        )]))
+        .build();
+    let context = browser.new_context_with_options(options).await?;
+    let page = context.new_page().await?;
+    page.goto(&format!("{}/echo-headers", server.url()), None)
+        .await?;
+    let echoed: serde_json::Value = serde_json::from_str(
+        &page
+            .locator("#headers")
+            .text_content()
+            .await?
+            .unwrap_or_default(),
+    )?;
+    assert_eq!(echoed["x-from-context"], serde_json::json!("yes"));
+
+    context.close().await?;
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn record_har_writes_the_traffic_when_the_context_closes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use patchright_rs::protocol::RecordHar;
+
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, _) = crate::common::setup().await;
+    let dir = tempfile::TempDir::new()?;
+    let har = dir.path().join("run.har");
+    let zip = dir.path().join("run.har.zip");
+    let url = format!("{}/echo-headers", server.url());
+
+    for path in [&har, &zip] {
+        let options = BrowserContextOptions::builder()
+            .record_har(RecordHar::new(path.to_str().expect("a UTF-8 temp path")))
+            .build();
+        let context = browser.new_context_with_options(options).await?;
+        let page = context.new_page().await?;
+        page.goto(&url, None).await?;
+        context.close().await?;
+    }
+
+    assert!(
+        crate::common::har_urls(&har)?.contains(&url),
+        "{url} is not in the HAR"
+    );
+    let zipped = std::fs::read(&zip)?;
+    assert!(
+        zipped.starts_with(b"PK"),
+        "{} is not a zip archive",
+        zip.display()
+    );
+
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn record_har_and_start_har_record_side_by_side() -> Result<(), Box<dyn std::error::Error>> {
+    use patchright_rs::protocol::RecordHar;
+
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, _) = crate::common::setup().await;
+    let dir = tempfile::TempDir::new()?;
+    let from_option = dir.path().join("option.har");
+    let from_tracing = dir.path().join("tracing.har");
+    let url = format!("{}/echo-headers", server.url());
+
+    let options = BrowserContextOptions::builder()
+        .record_har(RecordHar::new(
+            from_option.to_str().expect("a UTF-8 temp path"),
+        ))
+        .build();
+    let context = browser.new_context_with_options(options).await?;
+    let tracing = context.tracing().await?;
+    tracing
+        .start_har(from_tracing.to_str().expect("a UTF-8 temp path"), None)
+        .await?;
+    let page = context.new_page().await?;
+    page.goto(&url, None).await?;
+    tracing.stop_har().await?;
+    assert!(crate::common::har_urls(&from_tracing)?.contains(&url));
+    context.close().await?;
+    assert!(crate::common::har_urls(&from_option)?.contains(&url));
+
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn record_har_with_an_unknown_content_creates_no_context()
+-> Result<(), Box<dyn std::error::Error>> {
+    use patchright_rs::protocol::RecordHar;
+
+    let (_pw, browser, _) = crate::common::setup().await;
+    let dir = tempfile::TempDir::new()?;
+    let har = dir.path().join("run.har");
+    let before = browser.contexts().len();
+
+    let options = BrowserContextOptions::builder()
+        .record_har(RecordHar::new(har.to_str().expect("a UTF-8 temp path")).content("inline"))
+        .build();
+    let result = browser.new_context_with_options(options).await;
+
+    assert!(
+        matches!(result, Err(patchright_rs::Error::InvalidArgument(_))),
+        "expected InvalidArgument, got {:?}",
+        result.map(|_| ())
+    );
+    assert_eq!(browser.contexts().len(), before);
+
+    browser.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn record_har_that_cannot_be_written_fails_close_then_a_second_close_closes()
+-> Result<(), Box<dyn std::error::Error>> {
+    use patchright_rs::protocol::RecordHar;
+
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, _) = crate::common::setup().await;
+    let dir = tempfile::TempDir::new()?;
+    let har = dir.path().join("taken.har");
+    std::fs::create_dir(&har)?;
+    let url = format!("{}/echo-headers", server.url());
+
+    let options = BrowserContextOptions::builder()
+        .record_har(RecordHar::new(har.to_str().expect("a UTF-8 temp path")))
+        .build();
+    let context = browser.new_context_with_options(options).await?;
+    let page = context.new_page().await?;
+    page.goto(&url, None).await?;
+
+    assert!(
+        context.close().await.is_err(),
+        "a directory took the HAR's path"
+    );
+    assert!(!context.is_closed());
+    assert!(!dir.path().join("taken.har.tmp.zip").exists());
+    context.close().await?;
+    assert!(context.is_closed());
+
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn record_har_is_written_when_close_is_called_twice_at_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    use patchright_rs::protocol::RecordHar;
+
+    let server = crate::test_server::TestServer::start().await;
+    let (_pw, browser, _) = crate::common::setup().await;
+    let dir = tempfile::TempDir::new()?;
+    let har = dir.path().join("run.har");
+    let url = format!("{}/echo-headers", server.url());
+
+    let options = BrowserContextOptions::builder()
+        .record_har(RecordHar::new(har.to_str().expect("a UTF-8 temp path")))
+        .build();
+    let context = browser.new_context_with_options(options).await?;
+    let page = context.new_page().await?;
+    page.goto(&url, None).await?;
+
+    let (first, _second) = tokio::join!(context.close(), context.close());
+    first?;
+    assert!(
+        crate::common::har_urls(&har)?.contains(&url),
+        "{url} is not in the HAR"
+    );
+
+    browser.close().await?;
+    server.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_device_screen_is_what_the_page_reports_apart_from_the_viewport() {
+    let (playwright, browser, _page) = crate::common::setup().await;
+    let iphone = &playwright.devices()["iPhone 13"];
+    let screen = iphone.screen.clone().expect("iPhone 13 has a screen");
+    assert!(screen.height > iphone.viewport.height, "{screen:?}");
+
+    let context = browser
+        .new_context_with_options(
+            BrowserContextOptions::builder()
+                .viewport(iphone.viewport.clone().into())
+                .screen(screen.clone())
+                .build(),
+        )
+        .await
+        .expect("context with a screen");
+    let page = context.new_page().await.expect("page");
+    let reported: Vec<u32> = page
+        .evaluate(
+            "() => [screen.width, screen.height, innerWidth, innerHeight]",
+            None::<&()>,
+        )
+        .await
+        .expect("evaluate");
+    assert_eq!(
+        reported,
+        [
+            screen.width,
+            screen.height,
+            iphone.viewport.width,
+            iphone.viewport.height
+        ]
+    );
+
+    browser.close().await.expect("close");
+}

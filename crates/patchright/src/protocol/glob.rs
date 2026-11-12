@@ -1,0 +1,893 @@
+// URL glob matching, shared by client-side waits (`Frame::wait_for_url`) and
+// client-side route matching (`Page::route`, `BrowserContext::route`). Both
+// resolve each pattern against the context's base URL first
+// (`GlobMatcher::for_url`), as the driver's `urlMatches` does.
+//
+// This is a port of the driver's `globToRegexPattern`
+// (`packages/isomorphic/urlMatch.ts`), not an independent implementation.
+// Both sides have to agree on whether a URL matches: the server decides
+// which requests to report, and the client decides which handler to run, so
+// a pattern the two read differently means a route event nobody answers and
+// a request that hangs until it times out.
+
+/// Characters the driver escapes when translating a glob to a regex.
+///
+/// Kept as the driver's exact set rather than deferring to `regex::escape`,
+/// because `{`, `}` and `,` are glob syntax here (alternation) and must not
+/// be escaped, and because a wider set would silently diverge.
+const ESCAPED_CHARS: [char; 14] = [
+    '$', '^', '+', '.', '*', '(', ')', '|', '\\', '?', '{', '}', '[', ']',
+];
+
+fn push_escaped(out: &mut String, c: char) {
+    if ESCAPED_CHARS.contains(&c) {
+        out.push('\\');
+    }
+    out.push(c);
+}
+
+/// Translates a Playwright URL glob into an anchored regex pattern.
+///
+/// Ported from the driver so the two stay in step:
+///
+/// - `\x` is an escape; the next character is always literal.
+/// - `*` matches within one path segment.
+/// - `**` crosses segments. Between slashes (`/**/`) it also matches *zero*
+///   directories, so `a/**/b` matches `a/b`.
+/// - `{a,b}` is alternation. Nested or unbalanced braces are an error.
+/// - Everything else is literal.
+///
+/// Returns `None` for a malformed pattern (nested `{`, unmatched `}` or `{`),
+/// which the driver rejects by throwing.
+pub(crate) fn glob_to_regex_pattern(glob: &str) -> Option<String> {
+    let mut out = String::with_capacity(glob.len() + 2);
+    out.push('^');
+
+    let mut in_group = false;
+    // The driver indexes the glob directly and reads `glob[i - 1]` for the
+    // character before a `*` run. Walking with an iterator instead means
+    // carrying that character forward, which costs one variable and makes an
+    // off-by-one or a non-advancing loop impossible to write.
+    let mut previous: Option<char> = None;
+    let mut chars = glob.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // A trailing lone backslash has nothing to escape, so it is
+            // literal; the driver reaches the same place via its `i + 1 <
+            // length` guard falling through to the default branch.
+            let literal = chars.next().unwrap_or('\\');
+            push_escaped(&mut out, literal);
+            previous = Some(literal);
+            continue;
+        }
+
+        if c == '*' {
+            let char_before = previous;
+            // Consume the rest of the run with a bounded construct rather
+            // than a `while peek() == '*'`: an exhausted iterator yields
+            // `None` forever, so a loop keyed on that comparison can spin
+            // rather than end. `next_if_eq` stops the moment it does not
+            // match, which cannot.
+            let crosses_segments = std::iter::from_fn(|| chars.next_if_eq(&'*')).count() > 0;
+
+            if crosses_segments && chars.peek() == Some(&'/') {
+                chars.next();
+                if char_before == Some('/') {
+                    // `/**/` also matches zero directories.
+                    out.push_str("((.+/)|)");
+                } else {
+                    out.push_str("(.*/)");
+                }
+                previous = Some('/');
+            } else {
+                if crosses_segments {
+                    out.push_str("(.*)");
+                } else {
+                    out.push_str("([^/]*)");
+                }
+                previous = Some('*');
+            }
+            continue;
+        }
+
+        match c {
+            '{' => {
+                if in_group {
+                    return None;
+                }
+                in_group = true;
+                out.push('(');
+            }
+            '}' => {
+                if !in_group {
+                    return None;
+                }
+                in_group = false;
+                out.push(')');
+            }
+            ',' if in_group => out.push('|'),
+            other => push_escaped(&mut out, other),
+        }
+        previous = Some(c);
+    }
+
+    if in_group {
+        return None;
+    }
+
+    out.push('$');
+    Some(out)
+}
+
+/// Reads an `http(s)` base URL as the `ws(s)` URL a WebSocket pattern is
+/// resolved against, the scheme matched without regard to case. Any other
+/// base is left as it is.
+pub(crate) fn to_web_socket_base_url(base_url: &str) -> String {
+    match base_url.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => format!("ws://{rest}"),
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => format!("wss://{rest}"),
+        _ => base_url.to_string(),
+    }
+}
+
+/// Resolves a glob against `base_url` as the driver's `resolveGlobBase`
+/// does, so the client and the driver agree on what a pattern names.
+///
+/// A glob starting with `*` is left alone. Otherwise each path segment that
+/// holds glob syntax is swapped for a placeholder, the rest is resolved as a
+/// URL (which also normalizes it: a trailing slash after a bare host, a
+/// default port dropped, percent-encoding, a lowercased scheme and host),
+/// and the segments are put back, lowercased where they fall in the origin.
+fn resolve_glob_base(base_url: Option<&str>, glob: &str) -> String {
+    if glob.starts_with('*') {
+        return glob.to_string();
+    }
+    // An escaped `\\?` reads the same as `?`.
+    let glob = glob.replace("\\\\?", "?");
+    if ["about:", "data:", "chrome:", "edge:", "file:"]
+        .iter()
+        .any(|scheme| glob.starts_with(scheme))
+    {
+        return glob;
+    }
+
+    let mut tokens: Vec<(String, String)> = Vec::new();
+    let mut map_token = |original: &str, replacement: String| -> String {
+        if original.is_empty() {
+            return String::new();
+        }
+        tokens.push((replacement.clone(), original.to_string()));
+        replacement
+    };
+    let relative_path = glob
+        .split('/')
+        .enumerate()
+        .map(|(index, token)| {
+            if index == 0 && token.ends_with(':') {
+                if token.contains(['*', '{']) {
+                    return map_token(token, "http:".to_string());
+                }
+                return token.to_string();
+            }
+            if !token.contains(['*', '?', '{', '}', '\\']) {
+                return token.to_string();
+            }
+            match token.find('?') {
+                None => map_token(token, format!("$_{index}_$")),
+                Some(question) => {
+                    let (prefix, suffix) = token.split_at(question);
+                    let prefix = map_token(prefix, format!("$_{index}_$"));
+                    let suffix = map_token(suffix, format!("?$_{index}_$"));
+                    prefix + &suffix
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    let (mut resolved, origin) = resolve_base_url(base_url, &relative_path);
+    for (token, original) in tokens {
+        let in_origin = origin
+            .as_deref()
+            .is_some_and(|origin| origin.contains(&token));
+        let replacement = if in_origin {
+            original.to_lowercase()
+        } else {
+            original
+        };
+        resolved = resolved.replacen(&token, &replacement, 1);
+    }
+    resolved
+}
+
+/// Resolves an expected URL against `base_url` as the driver's
+/// `constructURLBasedOnBaseURL` does for `toHaveURL`: the URL comes back
+/// resolved and normalized, or unchanged when it does not resolve. Unlike
+/// [`GlobMatcher::for_url`] it reads no glob syntax.
+pub(crate) fn construct_url_based_on_base_url(base_url: Option<&str>, url: &str) -> String {
+    resolve_base_url(base_url, url).0
+}
+
+/// Resolves `given` against `base_url` as `new URL(given, baseURL)` does,
+/// returning the serialized URL and its origin, or `given` unchanged (and no
+/// origin) when either does not parse.
+fn resolve_base_url(base_url: Option<&str>, given: &str) -> (String, Option<String>) {
+    let parsed = match base_url {
+        Some(base) => url::Url::parse(base).and_then(|base| base.join(given)),
+        None => url::Url::parse(given),
+    };
+    match parsed {
+        Ok(url) => {
+            let origin = url.origin().ascii_serialization();
+            (url.into(), Some(origin))
+        }
+        Err(_) => (given.to_string(), None),
+    }
+}
+
+/// Returns whether `text` matches the glob `pattern`.
+///
+/// Returns `false` for a malformed pattern, matching the driver's behavior
+/// of treating it as matching nothing rather than panicking. Callers compile
+/// with [`GlobMatcher::new`] instead, once per pattern; this one-shot form is
+/// what the port's tests check against the driver's cases.
+#[cfg(test)]
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
+    GlobMatcher::new(pattern).is_some_and(|m| m.matches(text))
+}
+
+/// A glob compiled once, for callers that match the same pattern repeatedly.
+///
+/// `Frame::wait_for_url` polls every 50ms, so compiling per call meant
+/// hundreds of identical regex compilations for a single wait.
+#[derive(Clone)]
+pub(crate) struct GlobMatcher {
+    regex: regex::Regex,
+}
+
+impl GlobMatcher {
+    /// Compiles `pattern`, returning `None` if it is malformed.
+    pub(crate) fn new(pattern: &str) -> Option<Self> {
+        let regex_pattern = glob_to_regex_pattern(pattern)?;
+        regex::Regex::new(&regex_pattern)
+            .ok()
+            .map(|regex| Self { regex })
+    }
+
+    /// Compiles `pattern` the way the driver does before matching a URL
+    /// against it: resolved against `base_url` first. For a WebSocket
+    /// pattern the caller passes the base through [`to_web_socket_base_url`]
+    /// first. Returns `None` if the pattern is malformed.
+    pub(crate) fn for_url(base_url: Option<&str>, pattern: &str) -> Option<Self> {
+        Self::new(&resolve_glob_base(base_url, pattern))
+    }
+
+    pub(crate) fn matches(&self, text: &str) -> bool {
+        self.regex.is_match(text)
+    }
+}
+
+#[cfg(test)]
+mod properties {
+    use super::{GlobMatcher, glob_match, glob_to_regex_pattern};
+    use proptest::prelude::*;
+
+    /// Glob-shaped text over the full syntax: wildcards, group punctuation,
+    /// escapes, separators and regex metacharacters, in any order.
+    ///
+    /// Unlike `url_atom` this is allowed to be malformed. The point is to
+    /// reach the states hand-written cases do not: an unbalanced brace, a
+    /// backslash at the very end, a run of stars against a separator.
+    fn glob_soup() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            proptest::sample::select(vec![
+                "a", "/", "*", "**", "{", "}", ",", "\\", ".", "?", "[", "]", "(", ")", "|", "+",
+                "$", "^",
+            ]),
+            0..10,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    /// URL-ish text containing no glob metacharacter, over a deliberately
+    /// narrow alphabet that nonetheless includes the regex metacharacters a
+    /// real URL carries (`?`, `+`, `(`, `[`, ...).
+    ///
+    /// The alphabet is the point. Identifier-shaped input is already covered
+    /// by the example tests below, so letting the generator roam there would
+    /// rediscover those instead of exercising the escaping.
+    fn url_atom() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            proptest::sample::select(vec![
+                "a", "b", "1", "-", "_", "=", "&", "?", "+", "(", ")", "[", "]", "|", "$", "^", ".",
+            ]),
+            1..6,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// A pattern with no wildcard matches itself. Translating a glob to a
+        /// regex is exactly where "everything else is literal" stops holding.
+        #[test]
+        fn a_pattern_without_a_wildcard_is_literal(text in url_atom()) {
+            prop_assert!(
+                glob_match(&text, &text),
+                "pattern `{}` should match itself literally", text
+            );
+        }
+
+        /// A trailing `*` matches any one segment, whatever it contains.
+        #[test]
+        fn a_trailing_wildcard_matches_any_single_segment(
+            prefix in url_atom(),
+            segment in url_atom(),
+        ) {
+            let pattern = format!("https://example.com/{prefix}/*");
+            let text = format!("https://example.com/{prefix}/{segment}");
+            prop_assert!(
+                glob_match(&pattern, &text),
+                "`{}` should match `{}`", pattern, text
+            );
+        }
+
+        /// Escaping a character makes it literal, whatever it is. This is the
+        /// escape hatch for matching a URL that really does contain a `*`.
+        #[test]
+        fn a_backslash_escape_is_always_literal(text in url_atom()) {
+            let pattern: String = text.chars().flat_map(|c| ['\\', c]).collect();
+            prop_assert!(
+                glob_match(&pattern, &text),
+                "escaped `{}` should match `{}`", pattern, text
+            );
+        }
+
+        /// Anything this accepts, the regex engine must accept too.
+        ///
+        /// The two failure modes are indistinguishable to a caller: a glob we
+        /// reject and a glob we translate into an uncompilable regex both come
+        /// back as "matches nothing". This is the invariant that keeps that
+        /// silence honest, and it is the shape of the bug this module was
+        /// rewritten to fix.
+        #[test]
+        fn an_accepted_pattern_always_compiles(pattern in glob_soup()) {
+            if let Some(translated) = glob_to_regex_pattern(&pattern) {
+                prop_assert!(
+                    regex::Regex::new(&translated).is_ok(),
+                    "accepted `{}` but produced uncompilable regex `{}`",
+                    pattern, translated
+                );
+                prop_assert!(
+                    GlobMatcher::new(&pattern).is_some(),
+                    "`{}` translated but did not compile", pattern
+                );
+            }
+        }
+
+        /// Matching is total: no pattern, however malformed, panics.
+        #[test]
+        fn matching_never_panics(pattern in glob_soup(), text in glob_soup()) {
+            let _ = glob_match(&pattern, &text);
+        }
+    }
+}
+
+#[cfg(test)]
+mod url_matches {
+    use super::{GlobMatcher, to_web_socket_base_url};
+
+    fn url_matches(base_url: Option<&str>, url: &str, glob: &str) -> bool {
+        GlobMatcher::for_url(base_url, glob).is_some_and(|m| m.matches(url))
+    }
+
+    // The `urlMatches` cases of the driver's `interception.spec.ts` "should
+    // work with glob", in order, as (base URL, URL, glob, matches).
+    const DRIVER_CASES: &[(Option<&str>, &str, &str, bool)] = &[
+        (
+            None,
+            "http://playwright.dev/",
+            "http://playwright.dev",
+            true,
+        ),
+        (
+            None,
+            "http://playwright.dev/?a=b",
+            "http://playwright.dev?a=b",
+            true,
+        ),
+        (None, "http://playwright.dev/", "h*://playwright.dev", true),
+        (
+            None,
+            "http://api.playwright.dev/?x=y",
+            "http://*.playwright.dev?x=y",
+            true,
+        ),
+        (None, "http://playwright.dev/foo/bar", "**/foo/**", true),
+        (
+            Some("http://playwright.dev"),
+            "http://playwright.dev/?x=y",
+            "?x=y",
+            true,
+        ),
+        (
+            Some("http://playwright.dev/foo/"),
+            "http://playwright.dev/foo/bar?x=y",
+            "./bar?x=y",
+            true,
+        ),
+        (
+            None,
+            "http://playwright.dev/foo$$bar",
+            "http://playwright.dev/foo$$bar",
+            true,
+        ),
+        (
+            None,
+            "http://playwright.dev/a$&b",
+            "http://playwright.dev/a$&b",
+            true,
+        ),
+        (
+            Some("http://playwright.dev"),
+            "http://playwright.dev/p$$q",
+            "./p$$q",
+            true,
+        ),
+        (
+            None,
+            "https://playwright.dev/fooBAR",
+            "HtTpS://pLaYwRiGhT.dEv/fooBAR",
+            true,
+        ),
+        (
+            Some("http://ignored"),
+            "https://playwright.dev/fooBAR",
+            "HtTpS://pLaYwRiGhT.dEv/fooBAR",
+            true,
+        ),
+        (
+            None,
+            "https://playwright.dev/foobar",
+            "https://playwright.dev/fooBAR",
+            false,
+        ),
+        (
+            None,
+            "https://playwright.dev/foobar?a=b",
+            "https://playwright.dev/foobar?A=B",
+            false,
+        ),
+        (
+            None,
+            "http://example.com/path",
+            "http://example.com:80/path",
+            true,
+        ),
+        (
+            None,
+            "https://example.com/path",
+            "https://example.com:443/path",
+            true,
+        ),
+        (
+            None,
+            "http://example.com:8080/path",
+            "http://example.com:8080/path",
+            true,
+        ),
+        (None, "http://localhost/", "http://localhost:80/**", true),
+        (
+            None,
+            "http://example.com/foo%20bar",
+            "http://example.com/foo bar",
+            true,
+        ),
+        (
+            None,
+            "http://xn--mnchen-3ya.de/",
+            "http://münchen.de/",
+            true,
+        ),
+        (None, "https://localhost:3000/?a=b", "**/?a=b", true),
+        (None, "https://localhost:3000/?a=b", "**?a=b", true),
+        (None, "https://localhost:3000/?a=b", "**=b", true),
+        (
+            None,
+            "my.custom.protocol://foo",
+            "my.custom.protocol://**",
+            true,
+        ),
+        (None, "my.p://foo", "my.{p,y}://**", false),
+        (None, "my.p://foo/", "my.{p,y}://**", true),
+        (None, "file:///foo/", "f*e://**", true),
+        (
+            None,
+            "http://playwright.dev/",
+            "http://playwright.?ev",
+            false,
+        ),
+        (
+            None,
+            "http://playwright./?ev",
+            "http://playwright.?ev",
+            true,
+        ),
+        (
+            None,
+            "http://playwright.dev/foo",
+            "http://playwright.dev/f??",
+            false,
+        ),
+        (
+            None,
+            "http://playwright.dev/f??",
+            "http://playwright.dev/f??",
+            true,
+        ),
+        (
+            None,
+            "http://playwright.dev/?x=y",
+            "http://playwright.dev\\?x=y",
+            true,
+        ),
+        (
+            None,
+            "http://playwright.dev/?x=y",
+            "http://playwright.dev/\\?x=y",
+            true,
+        ),
+        (
+            Some("http://playwright.dev/foo"),
+            "http://playwright.dev/foo?bar",
+            "?bar",
+            true,
+        ),
+        (
+            Some("http://playwright.dev/foo"),
+            "http://playwright.dev/foo?bar",
+            "\\\\?bar",
+            true,
+        ),
+        (
+            Some("http://first.host/"),
+            "http://second.host/foo",
+            "**/foo",
+            true,
+        ),
+        (
+            Some("http://playwright.dev/"),
+            "http://localhost/",
+            "*//localhost/",
+            true,
+        ),
+        (None, "https://foo/bar.js", "https://foo/**/bar.js", true),
+        (None, "https://foo/bar.js", "https://foo/**/**/bar.js", true),
+    ];
+
+    #[test]
+    fn matches_urls_as_the_driver_does() {
+        for &(base_url, url, glob, expected) in DRIVER_CASES {
+            assert_eq!(
+                url_matches(base_url, url, glob),
+                expected,
+                "base {base_url:?}, url {url:?}, glob {glob:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_scheme_prefixes_are_not_resolved() {
+        for prefix in ["about", "data", "chrome", "edge", "file"] {
+            let base = Some("http://playwright.dev/");
+            let blank = format!("{prefix}:blank");
+            assert!(url_matches(base, &blank, &blank), "{prefix}");
+            assert!(
+                !url_matches(base, &blank, "http://playwright.dev/"),
+                "{prefix}"
+            );
+            assert!(url_matches(None, &blank, &blank), "{prefix}");
+            assert!(
+                url_matches(None, &blank, &format!("{prefix}:*")),
+                "{prefix}"
+            );
+            assert!(
+                !url_matches(None, &format!("not{prefix}:blank"), &format!("{prefix}:*")),
+                "{prefix}"
+            );
+        }
+    }
+
+    fn web_socket_matches(base_url: Option<&str>, url: &str, glob: &str) -> bool {
+        let base_url = base_url.map(to_web_socket_base_url);
+        GlobMatcher::for_url(base_url.as_deref(), glob).is_some_and(|m| m.matches(url))
+    }
+
+    #[test]
+    fn a_web_socket_pattern_resolves_against_the_ws_form_of_the_base() {
+        assert!(web_socket_matches(
+            Some("http://localhost:3000"),
+            "ws://localhost:3000/ws",
+            "/ws"
+        ));
+        assert!(web_socket_matches(
+            Some("https://localhost:3000"),
+            "wss://localhost:3000/ws",
+            "/ws"
+        ));
+        assert!(!web_socket_matches(
+            Some("http://localhost:3000"),
+            "http://localhost:3000/ws",
+            "/ws"
+        ));
+    }
+
+    #[test]
+    fn the_base_scheme_is_read_without_regard_to_case() {
+        assert!(web_socket_matches(
+            Some("HTTP://localhost:3000"),
+            "ws://localhost:3000/ws",
+            "/ws"
+        ));
+        assert!(web_socket_matches(
+            Some("HtTpS://localhost:3000"),
+            "wss://localhost:3000/ws",
+            "/ws"
+        ));
+    }
+
+    #[test]
+    fn a_base_that_is_not_http_is_left_as_it_is() {
+        for base in ["ws://localhost:3000/", "file:///tmp/", "localhost:3000"] {
+            assert_eq!(to_web_socket_base_url(base), base);
+        }
+    }
+
+    #[test]
+    fn a_web_socket_url_without_a_path_matches_with_its_trailing_slash() {
+        assert!(web_socket_matches(
+            None,
+            "ws://localhost:3000/",
+            "ws://localhost:3000"
+        ));
+    }
+
+    #[test]
+    fn only_a_first_segment_ending_in_a_colon_is_read_as_a_scheme() {
+        let base = Some("http://playwright.dev/dir/");
+        assert!(url_matches(
+            base,
+            "http://playwright.dev/dir/foobar/baz",
+            "foo*/baz"
+        ));
+        assert!(url_matches(base, "http://playwright.dev/dir/a/b:", "a/b*:"));
+    }
+
+    #[test]
+    fn a_relative_pattern_without_a_base_stays_as_written() {
+        assert!(url_matches(None, "/ws", "/ws"));
+        assert!(!url_matches(None, "http://localhost/ws", "/ws"));
+    }
+
+    #[test]
+    fn an_unusable_base_leaves_the_pattern_unnormalized() {
+        assert!(url_matches(
+            None,
+            "http://playwright.dev/",
+            "http://playwright.dev"
+        ));
+        for base in ["", "not a url"] {
+            assert!(
+                !url_matches(
+                    Some(base),
+                    "http://playwright.dev/",
+                    "http://playwright.dev"
+                ),
+                "base {base:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod construct_url {
+    use super::construct_url_based_on_base_url;
+
+    // (base URL, URL, resolved), each checked against the pinned driver's
+    // own constructURLBasedOnBaseURL.
+    const DRIVER_CASES: &[(Option<&str>, &str, &str)] = &[
+        (
+            Some("http://localhost:3000/foobar/"),
+            "/hello",
+            "http://localhost:3000/hello",
+        ),
+        (
+            Some("http://localhost:3000/foobar/"),
+            "./kek",
+            "http://localhost:3000/foobar/kek",
+        ),
+        (None, "http://localhost:3000", "http://localhost:3000/"),
+        (None, "/hello", "/hello"),
+        (Some("not a url"), "/hello", "/hello"),
+        (
+            Some("http://ignored/"),
+            "https://Example.COM:443/a",
+            "https://example.com/a",
+        ),
+    ];
+
+    #[test]
+    fn resolves_an_expected_url_as_the_driver_does() {
+        for &(base_url, url, resolved) in DRIVER_CASES {
+            assert_eq!(
+                construct_url_based_on_base_url(base_url, url),
+                resolved,
+                "base {base_url:?}, url {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_no_glob_syntax() {
+        assert_eq!(
+            construct_url_based_on_base_url(Some("http://localhost:3000/"), "**/a"),
+            "http://localhost:3000/**/a"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+
+    #[test]
+    fn exact_match_is_anchored() {
+        assert!(glob_match("https://example.com/", "https://example.com/"));
+        // anchored at both ends: a trailing extra segment must not match
+        assert!(!glob_match("https://example.com/", "https://example.com/x"));
+        // ...nor a prefix
+        assert!(!glob_match("example.com", "an.example.com"));
+    }
+
+    #[test]
+    fn single_star_stays_within_one_segment() {
+        assert!(glob_match(
+            "https://example.com/*",
+            "https://example.com/foo"
+        ));
+        // `*` does not cross a `/`
+        assert!(!glob_match(
+            "https://example.com/*",
+            "https://example.com/foo/bar"
+        ));
+        // `*` matches the empty string
+        assert!(glob_match("https://example.com/*", "https://example.com/"));
+
+        // A single star immediately before a `/` is still a single star: only
+        // a run of two or more takes the cross-segment branch.
+        assert!(glob_match(
+            "https://example.com/*/b",
+            "https://example.com/a/b"
+        ));
+        assert!(!glob_match(
+            "https://example.com/*/b",
+            "https://example.com/a/x/b"
+        ));
+    }
+
+    #[test]
+    fn double_star_crosses_segments() {
+        assert!(glob_match(
+            "https://example.com/**",
+            "https://example.com/a/b/c"
+        ));
+        assert!(glob_match(
+            "**/*.png",
+            "https://cdn.example.com/img/logo.png"
+        ));
+    }
+
+    #[test]
+    fn double_star_between_slashes_matches_zero_directories() {
+        // The driver emits `((.+/)|)` here, so the directories are optional.
+        assert!(glob_match(
+            "https://example.com/**/edit",
+            "https://example.com/edit"
+        ));
+        assert!(glob_match(
+            "https://example.com/**/edit",
+            "https://example.com/a/b/edit"
+        ));
+    }
+
+    #[test]
+    fn braces_are_alternation() {
+        assert!(glob_match("**/*.{png,jpg}", "https://example.com/a.png"));
+        assert!(glob_match("**/*.{png,jpg}", "https://example.com/a.jpg"));
+        assert!(!glob_match("**/*.{png,jpg}", "https://example.com/a.gif"));
+        // A comma outside a group is literal. The negative is the load-bearing
+        // half: were the comma alternation, `.../a,b` would still match itself
+        // through the `b$` branch while also matching `.../a`.
+        assert!(glob_match(
+            "https://example.com/a,b",
+            "https://example.com/a,b"
+        ));
+        assert!(!glob_match(
+            "https://example.com/a,b",
+            "https://example.com/a"
+        ));
+    }
+
+    #[test]
+    fn malformed_braces_match_nothing() {
+        assert!(!glob_match("{a{b}}", "ab"));
+        assert!(!glob_match("a}", "a}"));
+        assert!(!glob_match("{a", "a"));
+    }
+
+    #[test]
+    fn regex_metacharacters_are_literal() {
+        // These used to reach the regex engine: `[unterminated` failed to
+        // compile (matching nothing), and `?`/`+` silently changed what the
+        // pattern meant.
+        assert!(!glob_match("[unterminated", "anything"));
+        assert!(glob_match("[unterminated", "[unterminated"));
+
+        // A query string is the common case, and the one that motivated this.
+        assert!(glob_match(
+            "https://example.com/search?q=*",
+            "https://example.com/search?q=widget"
+        ));
+        // ...and it must not match the URL the unescaped `?` used to allow.
+        assert!(!glob_match(
+            "https://example.com/search?q=*",
+            "https://example.com/searcq=widget"
+        ));
+    }
+
+    #[test]
+    fn backslash_escapes_the_next_character() {
+        // the escape hatch for a URL that really contains a `*`
+        assert!(glob_match(
+            r"https://example.com/\*",
+            "https://example.com/*"
+        ));
+        assert!(!glob_match(
+            r"https://example.com/\*",
+            "https://example.com/x"
+        ));
+    }
+
+    #[test]
+    fn dot_is_literal_not_wildcard() {
+        assert!(glob_match(
+            "https://example.com/a.png",
+            "https://example.com/a.png"
+        ));
+        assert!(!glob_match(
+            "https://example.com/a.png",
+            "https://example.com/axpng"
+        ));
+    }
+
+    #[test]
+    fn extension_globs() {
+        assert!(glob_match("**/*.png", "https://example.com/a/b/c.png"));
+        assert!(!glob_match("**/*.png", "https://example.com/a/b/c.jpg"));
+
+        // `**/` before a segment emits `(.*/)`, which requires the slash, so
+        // a slashless subject does not match. Pins the star-run boundary:
+        // miscounting the stars here turns this into `(.*)`, which does.
+        assert!(!glob_match("**/*.png", "a.png"));
+    }
+
+    #[test]
+    fn a_trailing_backslash_is_literal() {
+        // There is nothing to escape, so the backslash is its own character.
+        // Pins the escape lookahead bound: reading past it panics.
+        assert!(glob_match(r"a\", r"a\"));
+        assert!(!glob_match(r"a\", "a"));
+    }
+}

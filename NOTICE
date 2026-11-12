@@ -1,0 +1,17 @@
+patchright-rs
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project contains code from:
+
+  playwright-rust — Copyright Paul Adamson and contributors
+  https://github.com/padamson/playwright-rust (Apache-2.0)
+  Forked at commit fd24e29a725939fe0cc432e3ddece1158e7cd267 (v0.20.1).
+
+  Patchright — Copyright Vinyzu and contributors
+  https://github.com/Kaliiiiiiiiii-Vinyzu/patchright (Apache-2.0)
+  The client-side patches in crates/patchright/src/patchright.rs and the
+  `PATCHRIGHT`-marked hunks are Rust ports of patchright-nodejs's
+  client_patches/. The bundled driver is the `patchright-core` npm package.
+
+  Playwright — Copyright Microsoft Corporation (Apache-2.0)
+  https://github.com/microsoft/playwright

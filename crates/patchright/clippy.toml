@@ -1,0 +1,6 @@
+# tokio::spawn is a re-export of tokio::task::spawn, so that entry covers both.
+disallowed-methods = [
+    { path = "tokio::task::spawn", reason = "use crate::task::spawn, or spawn_detached for a task that outlives its caller" },
+    { path = "tokio::runtime::Handle::spawn", reason = "use crate::task::spawn, or spawn_detached for a task that outlives its caller" },
+    { path = "tokio::task::JoinSet::spawn", reason = "use crate::task::spawn, or spawn_detached for a task that outlives its caller" },
+]

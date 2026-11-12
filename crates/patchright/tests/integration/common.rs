@@ -1,0 +1,262 @@
+use patchright_rs::protocol::{Browser, BrowserContext, GotoOptions, Page, Playwright, WebSocket};
+use std::path::PathBuf;
+use std::sync::Once;
+
+static INIT: Once = Once::new();
+
+pub fn init_tracing() {
+    INIT.call_once(|| {
+        // Default to 'error' to keep tests quiet unless RUST_LOG is set
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error"));
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    });
+}
+
+/// First navigation after a deliberately failed one, retried past the
+/// error-page-commit interrupt.
+///
+/// A failed navigation can leave Chromium committing a
+/// `chrome-error://chromewebdata/` page *after* `goto` has already returned
+/// `Err`, and that commit legitimately interrupts an immediately-following
+/// `goto` (upstream behavior, not a crate bug). Two error shapes are
+/// retryable within the window: that interrupt, and a per-attempt timeout —
+/// the attempt cap exists so one slow attempt cannot eat the whole window,
+/// so hitting it must buy another attempt, not a panic. (Both arrive as
+/// `Error::ProtocolError`; the crate never constructs `NavigationTimeout`.)
+/// Anything else panics immediately with the context, attempt count, and
+/// elapsed time, so a real goto regression cannot hide inside the window.
+/// Every retry is logged at warn, with a capped exponential backoff so a
+/// wedged page produces dozens of attempts in the log, not hundreds.
+pub async fn goto_recovering(page: &Page, url: &str, context: &str) {
+    const RECOVERY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+    const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const BACKOFF_CAP: std::time::Duration = std::time::Duration::from_millis(250);
+
+    let start = tokio::time::Instant::now();
+    let mut attempts = 0u32;
+    let mut backoff = std::time::Duration::from_millis(25);
+    loop {
+        attempts += 1;
+        match page
+            .goto(url, Some(GotoOptions::new().timeout(ATTEMPT_TIMEOUT)))
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    "{context}: recovered in {attempts} attempt(s), {:?}",
+                    start.elapsed()
+                );
+                return;
+            }
+            Err(e) => {
+                let retryable = matches!(
+                    &e,
+                    patchright_rs::Error::ProtocolError(m)
+                        if m.contains("interrupted by another navigation")
+                            || (m.contains("Timeout") && m.contains("exceeded"))
+                );
+                assert!(
+                    retryable,
+                    "{context}: navigation failed for a non-retryable reason after \
+                     {attempts} attempt(s) in {:?}: {e:?}",
+                    start.elapsed()
+                );
+                assert!(
+                    start.elapsed() < RECOVERY_WINDOW,
+                    "{context}: page did not recover after {attempts} attempt(s) \
+                     in {:?}; last error: {e:?}",
+                    start.elapsed()
+                );
+                tracing::warn!("{context} attempt {attempts} failed; retrying: {e:?}");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(BACKOFF_CAP);
+            }
+        }
+    }
+}
+
+/// Launch Playwright + Chromium browser + new page.
+///
+/// Initializes tracing and provides a ready-to-use (Playwright, Browser, Page) tuple.
+/// Panics with descriptive messages if any step fails.
+pub async fn setup() -> (Playwright, Browser, Page) {
+    init_tracing();
+    let playwright = Playwright::launch()
+        .await
+        .expect("setup: failed to launch Playwright — is the driver installed?");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("setup: failed to launch Chromium — are browsers installed?");
+    let page = browser
+        .new_page()
+        .await
+        .expect("setup: failed to create new page");
+    (playwright, browser, page)
+}
+
+/// Launch Playwright + Chromium browser + new context (without creating a page).
+///
+/// Use this when you need to configure the context before creating pages,
+/// or when testing context-level features like `on_page` or `expect_page`.
+pub async fn setup_context() -> (Playwright, Browser, BrowserContext) {
+    init_tracing();
+    let playwright = Playwright::launch()
+        .await
+        .expect("setup_context: failed to launch Playwright — is the driver installed?");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("setup_context: failed to launch Chromium — are browsers installed?");
+    let context = browser
+        .new_context()
+        .await
+        .expect("setup_context: failed to create new context");
+    (playwright, browser, context)
+}
+
+/// Launches Chromium and opens a page in a context created with `base_url`.
+pub async fn setup_with_base_url(base_url: String) -> (Playwright, Browser, BrowserContext, Page) {
+    init_tracing();
+    let playwright = Playwright::launch()
+        .await
+        .expect("setup_with_base_url: failed to launch Playwright — is the driver installed?");
+    let browser = playwright
+        .chromium()
+        .launch()
+        .await
+        .expect("setup_with_base_url: failed to launch Chromium — are browsers installed?");
+    let options = patchright_rs::protocol::BrowserContextOptions::builder()
+        .base_url(base_url)
+        .build();
+    let context = browser
+        .new_context_with_options(options)
+        .await
+        .expect("setup_with_base_url: failed to create the context");
+    let page = context
+        .new_page()
+        .await
+        .expect("setup_with_base_url: failed to create a page");
+    (playwright, browser, context, page)
+}
+
+/// The driver's own Node runtime and its `package/` directory, for tests
+/// that script the driver directly. The bundled runtime, not whatever
+/// `node` is on PATH, so the script sees the same Playwright the crate does.
+pub fn driver_node_and_package() -> (PathBuf, PathBuf) {
+    let (node, cli_js) =
+        patchright_rs::server::driver::get_driver_executable().expect("locate the driver");
+    let package = cli_js
+        .parent()
+        .expect("cli.js sits inside the package directory")
+        .to_path_buf();
+    (node, package)
+}
+
+/// A JavaScript string literal for `path`, so a Windows path with
+/// backslashes survives being pasted into a `require(...)`.
+pub fn js_string(path: &std::path::Path) -> String {
+    serde_json::to_string(&path.to_string_lossy()).expect("a string always serializes")
+}
+
+/// The request URLs a `.har` file at `path` recorded.
+pub fn har_urls(path: &std::path::Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let har: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    Ok(har["log"]["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["request"]["url"].as_str().map(str::to_string))
+        .collect())
+}
+
+/// Poll `cond` until it returns `true` or `timeout` elapses; returns whether
+/// it became true. Replaces "sleep a fixed N ms, then assert state changed"
+/// patterns, which flake on loaded CI — this waits only as long as needed, up
+/// to a generous bound, checking every 25ms.
+pub async fn poll_until<F: FnMut() -> bool>(timeout: std::time::Duration, mut cond: F) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if cond() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Navigates with a navigation timeout of `secs`, for a test that expects the
+/// navigation to fail or wait.
+pub async fn goto_within(
+    page: &Page,
+    url: &str,
+    secs: u64,
+) -> patchright_rs::Result<Option<patchright_rs::protocol::Response>> {
+    page.goto(
+        url,
+        Some(GotoOptions::new().timeout(std::time::Duration::from_secs(secs))),
+    )
+    .await
+}
+
+/// Navigates and asserts that a route handler's failure aborted the request,
+/// rather than leaving it to time out.
+pub async fn navigate_and_expect_an_abort(page: &Page, url: &str) {
+    let error = goto_within(page, url, 5)
+        .await
+        .expect_err("an aborted navigation fails");
+    assert!(
+        error.to_string().contains("net::ERR_FAILED"),
+        "the handler's error aborts the request instead of leaving it to time out: {error}"
+    );
+}
+
+/// What the test server's `/api/echo-request` endpoint saw, read from the
+/// page that navigated to it: method, path, headers, and body.
+pub async fn echoed_request(page: &Page) -> serde_json::Value {
+    let text = page
+        .evaluate_value("document.body.textContent")
+        .await
+        .expect("read echoed request");
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("echo endpoint returned {text:?}: {e}"))
+}
+
+/// The first WebSocket a page opens after [`capture_websocket`] was called.
+pub struct CapturedWebSocket(tokio::sync::oneshot::Receiver<WebSocket>);
+
+impl CapturedWebSocket {
+    pub async fn wait(self) -> WebSocket {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.0)
+            .await
+            .expect("no websocket event within 5s")
+            .expect("websocket handler was dropped before a socket opened")
+    }
+}
+
+/// Registers a `websocket` handler that hands out the first socket the page
+/// opens. Call before the navigation that opens it.
+pub async fn capture_websocket(page: &Page) -> CapturedWebSocket {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+    page.on_websocket(move |ws| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            if let Some(tx) = tx.lock().unwrap().take() {
+                let _ = tx.send(ws);
+            }
+            Ok(())
+        })
+    })
+    .await
+    .expect("register on_websocket");
+    CapturedWebSocket(rx)
+}
