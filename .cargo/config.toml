@@ -1,0 +1,6 @@
+[alias]
+# Run the xtask binary: build tooling that isn't a library and shouldn't
+# ship to crates.io.
+#
+# Example: `cargo xtask sync-protocol-spec`
+xtask = "run --package xtask --release --"

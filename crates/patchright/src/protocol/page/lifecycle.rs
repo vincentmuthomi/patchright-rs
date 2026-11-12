@@ -120,6 +120,7 @@ impl Page {
             ws_route_handlers: Arc::new(WebSocketRouteHandlers::new(base_url.as_deref())),
             viewport,
             is_closed: Arc::new(AtomicBool::new(false)),
+            close_was_called: Arc::new(AtomicBool::new(false)),
             default_timeout_ms: Arc::new(AtomicU64::new(crate::DEFAULT_TIMEOUT_MS.to_bits())),
             default_navigation_timeout_ms: Arc::new(AtomicU64::new(
                 crate::DEFAULT_TIMEOUT_MS.to_bits(),
@@ -235,6 +236,11 @@ impl Page {
     #[tracing::instrument(level = "info", skip_all, fields(guid = %self.guid()))]
     pub async fn close_with_options(&self, options: super::PageCloseOptions) -> Result<()> {
         let (method, params) = super::close_command(&options);
+        // PATCHRIGHT: `_closeWasCalled` upstream, set before the close is sent
+        // and not for a close that only runs the beforeunload handlers.
+        if method == "close" {
+            self.close_was_called.store(true, Ordering::Relaxed);
+        }
         let result = self.channel().send_no_result(method, params).await;
         // Mark as closed regardless of error (best-effort). A page asked only
         // to run its beforeunload handlers is marked by its `close` event.
@@ -242,6 +248,12 @@ impl Page {
             self.is_closed.store(true, Ordering::Relaxed);
         }
         result
+    }
+
+    /// PATCHRIGHT: whether `close()` has been called on this page, whether or
+    /// not the close has finished (`_closeWasCalled` upstream).
+    pub(crate) fn close_was_called(&self) -> bool {
+        self.close_was_called.load(Ordering::Relaxed)
     }
 
     /// Returns whether the page has been closed.

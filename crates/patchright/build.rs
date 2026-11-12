@@ -37,11 +37,19 @@ use std::path::{Path, PathBuf};
 
 // PATCHRIGHT: the version of the `patchright-core` npm package (see
 // `NPM_CORE_PACKAGE` in driver_urls.rs). Patchright follows Playwright's
-// major.minor but numbers its own patch releases (1.64.3 is built on
-// Playwright 1.64.1), and it can lag the playwright-rust release this crate
-// was forked from by a minor version. Browsers come from this version's
-// `browsers.json`, so `patchright-rs install chromium` must use this driver.
+// major.minor but numbers its own patch releases, and it can lag the
+// playwright-rust release this crate was forked from by a minor version.
+// Browsers come from this version's `browsers.json`, so `patchright-rs
+// install chromium` must use this driver. `cargo xtask update-driver` moves
+// this pin and everything that goes with it.
 const PLAYWRIGHT_VERSION: &str = "1.64.3";
+
+// PATCHRIGHT: the Playwright release `PLAYWRIGHT_VERSION` is built on. The
+// build does not use it; `cargo xtask sync-protocol-spec` reads it to vendor
+// `protocol-spec/` from the matching Playwright tag, since patchright
+// publishes no protocol spec of its own. `cargo xtask update-driver` sets both.
+#[allow(dead_code)]
+const PLAYWRIGHT_UPSTREAM_VERSION: &str = "1.64.1";
 
 // Download + assembly logic shared with the cli binary (`src/bin/
 // patchright_rs.rs`); pulls in the pure URL/platform mapping from

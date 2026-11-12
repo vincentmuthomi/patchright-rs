@@ -148,7 +148,12 @@ pub(crate) async fn inject_route_handler(route: Route) -> Result<()> {
         patchright_init_script: Some(true),
         ..ContinueOptions::default()
     });
-    route.fallback(overrides).await
+    // Upstream wraps the flagged fallback in try/catch and falls back plainly
+    // when it throws.
+    match route.fallback(overrides).await {
+        Ok(()) => Ok(()),
+        Err(_) => route.fallback(None).await,
+    }
 }
 
 #[cfg(test)]

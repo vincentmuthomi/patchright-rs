@@ -519,11 +519,27 @@ impl Request {
     ///
     /// # Errors
     ///
-    /// Returns an error if the RPC call to the server fails.
+    /// Returns an error if the RPC call to the server fails, or if `close()`
+    /// has been called on the request's page.
     ///
     /// See: <https://playwright.dev/docs/api/class-request#request-all-headers>
     #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid()))]
     pub async fn all_headers(&self) -> Result<HashMap<String, String>> {
+        // PATCHRIGHT: upstream's `allHeaders` throws `TargetClosedError` once
+        // the page has been asked to close, even when it already holds the
+        // headers. Upstream checks after reading them; a read that fails on
+        // the closed page raises the same error there, so checking first
+        // gives the one outcome without a call that cannot succeed. A frame
+        // whose page is gone from the registry belongs to a closed page.
+        if self
+            .frame()
+            .is_some_and(|frame| frame.page().is_none_or(|page| page.close_was_called()))
+        {
+            return Err(crate::error::Error::TargetClosed {
+                target_type: "Page".to_string(),
+                context: "Target page, context or browser has been closed".to_string(),
+            });
+        }
         Ok(crate::protocol::route_params::merge_headers(
             self.headers_array()
                 .await?
@@ -546,7 +562,15 @@ impl Request {
     /// See: <https://playwright.dev/docs/api/class-request#request-header-value>
     #[tracing::instrument(level = "debug", skip_all, fields(guid = %self.guid(), name = %name))]
     pub async fn header_value(&self, name: &str) -> Result<Option<String>> {
-        let all = self.all_headers().await?;
+        // Not `all_headers()`: upstream patches only `allHeaders` to fail on
+        // a page that was asked to close, so this must not inherit that.
+        let all = crate::protocol::route_params::merge_headers(
+            self.headers_array()
+                .await?
+                .into_iter()
+                .map(|entry| (entry.name, entry.value)),
+            Some(", "),
+        );
         Ok(all.get(&name.to_lowercase()).cloned())
     }
 

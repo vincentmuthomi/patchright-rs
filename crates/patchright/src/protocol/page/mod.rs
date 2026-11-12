@@ -78,6 +78,9 @@ pub struct Page {
     /// Whether this page has been closed.
     /// Set to true when close() is called or a "close" event is received.
     is_closed: Arc<AtomicBool>,
+    /// PATCHRIGHT: set as soon as `close()` is called, before the page has
+    /// closed (`_closeWasCalled` upstream). See `Request::all_headers`.
+    close_was_called: Arc<AtomicBool>,
     /// Default timeout for actions (milliseconds), stored as f64 bits.
     default_timeout_ms: Arc<AtomicU64>,
     /// Default timeout for navigation operations (milliseconds), stored as f64 bits.

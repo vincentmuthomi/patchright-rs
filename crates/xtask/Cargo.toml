@@ -1,0 +1,27 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+serde_json = { workspace = true }
+# Fetches the pinned driver's protocol spec. Already in the graph through
+# patchright-rs's build script, so no new audit surface.
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
+    "rustls-webpki-roots",
+] }
+# Digests the vendored spec files so the offline check can see an edited or
+# truncated tree. Drift detection, not a security boundary.
+sha1 = "0.11"

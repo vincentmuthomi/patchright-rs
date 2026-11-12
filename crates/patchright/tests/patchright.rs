@@ -187,3 +187,52 @@ async fn locators_reach_into_closed_shadow_roots() {
 
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn all_headers_fails_once_the_page_was_asked_to_close() {
+    let (_pw, browser) = launch().await;
+    let page = browser.new_page().await.unwrap();
+    let response = page
+        .goto(&serve().await, None)
+        .await
+        .unwrap()
+        .expect("a response for an http navigation");
+    let request = response.request().expect("the navigation request");
+
+    assert!(request.all_headers().await.is_ok());
+    page.close().await.unwrap();
+    let after = request.all_headers().await;
+    assert!(
+        matches!(after, Err(patchright_rs::Error::TargetClosed { .. })),
+        "all_headers after close: {after:?}"
+    );
+
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn focus_control_is_accepted_and_turns_focus_emulation_off() {
+    use patchright_rs::protocol::BrowserContextOptions;
+
+    let (_pw, browser) = launch().await;
+    let url = serve().await;
+
+    // Default: the driver emulates focus, so a page always reports focus.
+    let emulated = browser.new_context().await.unwrap();
+    let page = emulated.new_page().await.unwrap();
+    page.goto(&url, None).await.unwrap();
+    assert!(eval::<bool>(&page, "() => document.hasFocus()").await);
+
+    // focus_control: the context is created and pages still work; the
+    // focus state is then the window's own, which a test cannot pin down.
+    let options = BrowserContextOptions::builder().focus_control(true).build();
+    let real = browser.new_context_with_options(options).await.unwrap();
+    let page = real.new_page().await.unwrap();
+    page.goto(&url, None).await.unwrap();
+    assert_eq!(
+        eval::<String>(&page, "() => document.title").await,
+        "patchright-rs"
+    );
+
+    browser.close().await.unwrap();
+}

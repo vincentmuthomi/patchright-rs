@@ -398,6 +398,12 @@ pub struct BrowserContextOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strict_selectors: Option<bool>,
 
+    /// PATCHRIGHT: leaves the page's real focus state alone. By default the
+    /// driver turns on focus emulation, so every page reports itself focused;
+    /// `true` skips that (patchright's `focusControl` / `focus_control`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_control: Option<bool>,
+
     /// Emulates 'prefers-reduced-motion' media feature
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reduced_motion: Option<String>,
@@ -468,6 +474,7 @@ pub struct BrowserContextOptionsBuilder {
     timeout: Option<f64>,
     traces_dir: Option<String>,
     strict_selectors: Option<bool>,
+    focus_control: Option<bool>,
     reduced_motion: Option<String>,
     forced_colors: Option<String>,
     service_workers: Option<String>,
@@ -760,6 +767,13 @@ impl BrowserContextOptionsBuilder {
         self
     }
 
+    /// PATCHRIGHT: `true` stops the driver from emulating focus, so pages
+    /// see the window's real focus state (patchright's `focus_control`).
+    pub fn focus_control(mut self, enabled: bool) -> Self {
+        self.focus_control = Some(enabled);
+        self
+    }
+
     /// Emulates 'prefers-reduced-motion' media feature
     pub fn reduced_motion(mut self, value: String) -> Self {
         self.reduced_motion = Some(value);
@@ -850,6 +864,7 @@ impl BrowserContextOptionsBuilder {
             timeout: self.timeout,
             traces_dir: self.traces_dir,
             strict_selectors: self.strict_selectors,
+            focus_control: self.focus_control,
             reduced_motion: self.reduced_motion,
             forced_colors: self.forced_colors,
             service_workers: self.service_workers,
@@ -980,6 +995,7 @@ mod tests {
             timeout: Some(0.0),
             traces_dir: Some(String::new()),
             strict_selectors: Some(false),
+            focus_control: Some(false),
             reduced_motion: Some(String::new()),
             forced_colors: Some(String::new()),
             service_workers: Some(String::new()),
@@ -1014,7 +1030,20 @@ mod tests {
         // Two of these never reach the driver as parameters: storageStatePath
         // is read and sent inline as storageState, and timeout moves into the
         // message metadata, where the server takes a call's deadline from.
-        assert_eq!(undeclared, ["storageStatePath", "timeout"]);
+        // PATCHRIGHT: focusControl is declared by the patched driver only
+        // (patchright adds it to ContextOptions), not by the vendored
+        // Playwright spec.
+        assert_eq!(undeclared, ["focusControl", "storageStatePath", "timeout"]);
+    }
+
+    #[test]
+    fn focus_control_uses_the_patched_drivers_spelling() {
+        let unset = serde_json::to_value(BrowserContextOptions::builder().build()).unwrap();
+        assert!(unset.get("focusControl").is_none());
+
+        let set = BrowserContextOptions::builder().focus_control(true).build();
+        let value = serde_json::to_value(&set).unwrap();
+        assert_eq!(value["focusControl"], serde_json::json!(true));
     }
 
     #[test]

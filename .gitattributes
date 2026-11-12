@@ -1,0 +1,7 @@
+# The protocol spec is vendored byte for byte and `protocol-spec/MANIFEST`
+# holds a digest of each file, so a checkout must not rewrite line endings
+# (`core.autocrlf` on Windows would, and `cargo xtask sync-protocol-spec
+# --check` would then report every file as edited).
+protocol-spec/*.yml -text
+protocol-spec/MANIFEST text eol=lf
+protocol-spec/DRIVER_VERSION text eol=lf

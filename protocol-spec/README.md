@@ -2,8 +2,17 @@
 
 The wire contract this crate implements, taken verbatim from
 `packages/protocol/spec/` in the Playwright repository at the tag of the
-driver `crates/playwright/build.rs` pins. `DRIVER_VERSION` records which
-one.
+Playwright release the pinned driver is built on. `DRIVER_VERSION` records
+which one.
+
+The driver is `patchright-core`, which numbers its own patch releases and
+publishes no spec of its own, so `crates/patchright/build.rs` pins two
+versions: `PLAYWRIGHT_VERSION` (the `patchright-core` release) and
+`PLAYWRIGHT_UPSTREAM_VERSION` (the Playwright release it is built on, and
+the tag this spec comes from). Patchright's own additions to the protocol
+(`isolatedContext` on the evaluate commands, `patchrightInitScript` on
+`Route.continue`, `focusControl` in the context options) are therefore not
+in these files.
 
 It is vendored rather than fetched on demand so that **a driver bump shows
 its wire-contract delta as a diff in the bump commit**. That matters
@@ -15,23 +24,31 @@ with no error anywhere and every existing test still passing.
 
 ## Refreshing it
 
-Part of bumping the driver, after `PLAYWRIGHT_VERSION` moves:
+`cargo xtask update-driver` bumps the driver to the latest stable
+`patchright-core` and refreshes the spec with it:
 
 ```bash
-cargo xtask sync-protocol-spec     # fetches at the newly pinned tag
+cargo xtask update-driver          # pin, npm integrity and spec together
 git diff protocol-spec             # this diff is the review
 ```
 
 Read the diff for removed or renamed parameters on commands this crate
 sends, then for added ones worth surfacing.
 
-`cargo xtask sync-protocol-spec --check` runs offline in CI and
-pre-commit. It fails when the vendored copy is not the pinned driver's,
-and `MANIFEST` lets it also catch a file that was edited, lost, or added
-by hand, so "vendored verbatim" is checked rather than assumed. The sync
-fetches every file before writing any, so a failed refresh leaves the
-previous copy intact instead of a half-written tree the stamp still
-vouches for.
+`cargo xtask sync-protocol-spec` refetches the spec alone, at the release
+`build.rs` already pins.
 
-Nothing here is compiled or published; the crate reads the driver's
-behavior, not these files.
+`cargo xtask sync-protocol-spec --check` runs offline. It fails when the
+vendored copy is not the pinned driver's, and `MANIFEST` lets it also catch
+a file that was edited, lost, or added by hand, so "vendored verbatim" is
+checked rather than assumed. Nothing runs it automatically in this
+repository yet (there is no CI or pre-commit configuration), so run it
+before committing a change here. The sync fetches every file before writing
+any, so a failed refresh leaves the previous copy intact instead of a
+half-written tree the stamp still vouches for.
+
+The `.gitattributes` at the repository root stops Git from converting these
+files' line endings on checkout, which would change their digests.
+
+Nothing here is compiled into the library or published; only the crate's
+unit tests read these files.

@@ -32,8 +32,9 @@ fn test_playwright_version_format() {
 
 #[test]
 fn test_playwright_version_matches_expected() {
-    // Verify version matches the current expected version (1.64.3, the pinned patchright-core)
-    // This ensures the constant is properly synced with build.rs
+    // Verify version matches the pinned patchright-core. This ensures the
+    // constant is properly synced with build.rs; `cargo xtask update-driver`
+    // rewrites both.
     assert_eq!(PLAYWRIGHT_VERSION, "1.64.3");
 }
 

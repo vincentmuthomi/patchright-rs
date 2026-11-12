@@ -3,6 +3,7 @@ members = [
     "crates/patchright",
     "crates/playwright-rs-macros",
     "crates/playwright-rs-trace",
+    "crates/xtask",
 ]
 resolver = "2"
 
@@ -12,7 +13,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["patchright-rs contributors", "Paul Adamson (playwright-rust)"]
-repository = "https://github.com/padamson/playwright-rust"  # TODO: set to the patchright-rs repository
+repository = "https://github.com/vincentmuthomi/patchright-rs"
 
 [workspace.dependencies]
 # Async runtime
