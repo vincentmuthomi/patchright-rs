@@ -10,6 +10,9 @@ description = "Compile-time-validated selector macros for playwright-rs"
 keywords = ["playwright", "macros", "selectors", "compile-time"]
 categories = ["development-tools::testing", "rust-patterns"]
 readme = "README.md"
+# Published upstream by playwright-rust under this name; patchright-rs
+# depends on the crates.io release. Kept here only for local development.
+publish = false
 
 [lib]
 proc-macro = true

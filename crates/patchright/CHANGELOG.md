@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-15
+
+### Changed
+
+- **The README describes installing from crates.io.** Setup uses `cargo add patchright-rs`, Chromium is installed through `cargo install patchright-rs --features cli`, and working from a checkout moved to its own section.
+- **`playwright-rs-macros` and `playwright-rs-trace` are marked `publish = false` in this workspace.** Those names belong to upstream playwright-rust on crates.io; patchright-rs depends on their published releases, so nothing changes for users.
+
+## [0.1.0] - 2026-11-15
+
+First release on crates.io.
+
 ### Added
 
 - **The driver is embedded in the library (`bundled-driver` feature, on by default).** A binary built with the crate runs on a machine that never built it: the first launch unpacks the driver (Node + patchright-core, ~43 MB compressed, ~110 MB unpacked) into the user cache, atomically, and later launches reuse it. Turn the feature off to leave it out.

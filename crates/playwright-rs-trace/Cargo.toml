@@ -10,6 +10,9 @@ description = "Parser for Playwright trace zip files (formats v8 and v9)"
 keywords = ["playwright", "trace", "parser", "viewer"]
 categories = ["development-tools::testing", "parser-implementations"]
 readme = "README.md"
+# Published upstream by playwright-rust under this name; patchright-rs
+# depends on the crates.io release. Kept here only for local development.
+publish = false
 
 [dependencies]
 serde = { workspace = true }

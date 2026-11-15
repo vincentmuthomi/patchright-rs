@@ -1,5 +1,9 @@
 # patchright-rs
 
+[![crates.io](https://img.shields.io/crates/v/patchright-rs.svg)](https://crates.io/crates/patchright-rs)
+[![docs.rs](https://img.shields.io/docsrs/patchright-rs)](https://docs.rs/patchright-rs)
+[![license](https://img.shields.io/crates/l/patchright-rs.svg)](LICENSE)
+
 **Patchright for Rust**: an undetected, drop-in version of Playwright for Rust,
 the way [patchright-python](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python)
 and [patchright-nodejs](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs)
@@ -28,45 +32,61 @@ Playwright API, with two changes:
    rustc --version
    ```
 
-2. **Get this repository.** The crate is not on crates.io yet, so it is used
-   from a checkout.
+2. **Add it to your project**, next to tokio:
 
    ```sh
-   git clone https://github.com/vincentmuthomi/patchright-rs
+   cargo add patchright-rs
+   cargo add tokio --features full
    ```
 
-3. **Add it to your project** as a path dependency, next to tokio:
+   or in `Cargo.toml`:
 
    ```toml
    [dependencies]
-   patchright-rs = { path = "../patchright-rs/crates/patchright" }
+   patchright-rs = "0.1"
    tokio = { version = "1", features = ["full"] }
    ```
 
-4. **Build once with network access.** The first `cargo build` downloads the
+3. **Build once with network access.** The first `cargo build` downloads the
    driver: `patchright-core` and a pinned Node.js, both checked against pinned
    digests. It goes in `<user cache>/patchright-rust/<version>/`
    (`%LOCALAPPDATA%` on Windows, `~/.cache` on Linux, `~/Library/Caches` on
    macOS) and is reused by every project on the machine, so later builds work
    offline.
 
-5. **Install the matching Chromium.** Run this inside the patchright-rs
-   checkout, once per driver version:
+4. **Install the matching Chromium**, once per driver version, with the
+   crate's CLI:
 
    ```sh
-   cargo run -p patchright-rs --features cli --bin patchright-rs -- install chromium
+   cargo install patchright-rs --features cli
+   patchright-rs install chromium
    # or: <driver dir>/node <driver dir>/package/cli.js install chromium
    ```
 
-6. **Check that it works.** Still in the checkout:
+   Install the CLI at the same version as the library in your project, so it
+   installs the Chromium that library's driver expects.
 
-   ```sh
-   cargo run -p patchright-rs --example basic          # prints the title of example.com
-   cargo test -p patchright-rs --test patchright       # the patchright behaviour, end to end
-   ```
+5. **Check that it works** with the [example below](#using-the-api), which
+   prints the title of example.com.
 
 For the recommended undetected configuration, also install Google Chrome and
 see [the undetected setup](#best-practice-the-undetected-setup) below.
+
+### Working from source
+
+To run the examples and tests, or to work on the crate itself, clone the
+repository and use the workspace directly:
+
+```sh
+git clone https://github.com/vincentmuthomi/patchright-rs
+cd patchright-rs
+cargo run -p patchright-rs --features cli --bin patchright-rs -- install chromium
+cargo run -p patchright-rs --example basic          # prints the title of example.com
+cargo test -p patchright-rs --test patchright       # the patchright behaviour, end to end
+```
+
+To use an unreleased checkout from another project, point the dependency at
+it: `patchright-rs = { path = "../patchright-rs/crates/patchright" }`.
 
 ## Shipping an application
 
@@ -159,7 +179,7 @@ Anywhere else, call `patchright_rs::set_driver_dir(dir)` at startup.
    others:
 
    ```toml
-   patchright-rs = { path = "...", default-features = false, features = ["native-tls", "ring", "macros", "route-service"] }
+   patchright-rs = { version = "0.1", default-features = false, features = ["native-tls", "ring", "macros", "route-service"] }
    ```
 
    Without the embedded copy, a binary run from outside an installed layout
