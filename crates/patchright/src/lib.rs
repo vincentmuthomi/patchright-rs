@@ -263,6 +263,7 @@ pub mod api;
 mod assertions;
 mod error;
 pub mod patchright;
+mod process;
 pub mod protocol;
 mod task;
 pub mod testing;
@@ -303,6 +304,10 @@ pub use patchright::IsolatedContextExt;
 
 // Re-export error types
 pub use error::{Error, Result};
+
+// Point launches at a driver the application ships itself (a Tauri
+// resource, say) instead of the one embedded at build time.
+pub use server::driver::set_driver_dir;
 
 // Re-export assertions API
 pub use assertions::{Expectation, PageExpectation, expect, expect_page};

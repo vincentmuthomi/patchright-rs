@@ -15,6 +15,7 @@ pub mod channel_owner;
 pub mod connection;
 #[doc(hidden)]
 pub mod driver;
+mod embedded_driver;
 #[doc(hidden)]
 pub mod error_parsing;
 #[doc(hidden)]

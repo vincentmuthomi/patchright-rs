@@ -13,14 +13,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// The driver directory is located in this order:
 /// 1. `PLAYWRIGHT_DRIVER_PATH` (user override: a directory holding `node`, or
 ///    `node.exe` on Windows, and `package/cli.js`)
-/// 2. The driver build.rs assembled, at the path it recorded (by default the
+/// 2. The directory the application passed to [`set_driver_dir`]
+/// 3. A `patchright-driver/` directory an installer put beside the running
+///    executable: next to it, in a macOS bundle's `Resources`, or in
+///    `../lib/<exe name>` on Linux (see `installed_driver_candidates`)
+/// 4. The driver build.rs assembled, at the path it recorded (by default the
 ///    user cache; `PLAYWRIGHT_DRIVER_CACHE_DIR` moves it)
-/// 3. The user cache at this crate's version and platform, which
-///    `playwright-rs install` also populates; the same path as 2 for a
-///    default build, and the one that still resolves when 2's record is
+/// 5. The user cache at this crate's version and platform, which
+///    `playwright-rs install` also populates; the same path as 4 for a
+///    default build, and the one that still resolves when 4's record is
 ///    stale, as after `cargo install` or a build that skipped the download
-/// 4. Global npm installation (`npm root -g`) (development fallback)
-/// 5. Local npm installation (`npm root`) (development fallback)
+/// 6. The driver embedded in the library (`bundled-driver` feature, on by
+///    default), unpacked into the user cache path of 5 on first use, so a
+///    binary carried to a machine that never built it still has a driver
+/// 7. Global npm installation (`npm root -g`) (development fallback)
+/// 8. Local npm installation (`npm root`) (development fallback)
 ///
 /// On top of that, `PLAYWRIGHT_NODE_EXE` replaces the runtime and
 /// `PLAYWRIGHT_CLI_JS` replaces the CLI script, each independently. Setting
@@ -89,10 +96,19 @@ fn resolve_driver_dir(env: &impl Fn(&str) -> Option<String>) -> Result<Option<(P
     if let Some(found) = try_driver_path_env(env)? {
         return Ok(Some(found));
     }
+    if let Some(found) = try_app_driver_dir()? {
+        return Ok(Some(found));
+    }
+    if let Some(found) = try_installed_driver() {
+        return Ok(Some(found));
+    }
     if let Some(found) = try_bundled_driver()? {
         return Ok(Some(found));
     }
     if let Some(found) = try_user_cache_driver()? {
+        return Ok(Some(found));
+    }
+    if let Some(found) = crate::server::embedded_driver::extract()? {
         return Ok(Some(found));
     }
     if let Some(found) = try_npm_global()? {
@@ -287,6 +303,90 @@ fn try_user_cache_driver_in(
     }
 }
 
+/// The directory [`set_driver_dir`] recorded.
+static APP_DRIVER_DIR: parking_lot::RwLock<Option<PathBuf>> = parking_lot::RwLock::new(None);
+
+/// Use the driver in `dir` for every later launch in this process.
+///
+/// For an application whose installer puts the driver somewhere other than
+/// the locations probed automatically (beside the executable, a macOS
+/// bundle's `Resources`, `../lib/<exe name>`): call this at startup with the
+/// installed directory, which holds `node` (`node.exe` on Windows) and
+/// `package/cli.js`. It is checked right after the `PLAYWRIGHT_DRIVER_PATH`
+/// override and before every other location, so the embedded driver is
+/// never unpacked.
+///
+/// The directory is checked at launch, not here: a launch fails with
+/// [`Error::DriverMisconfigured`] if it lacks either file.
+///
+/// ```no_run
+/// # let dir = std::path::PathBuf::from("/opt/my-app/data/patchright-driver");
+/// patchright_rs::set_driver_dir(dir);
+/// ```
+pub fn set_driver_dir(dir: impl Into<PathBuf>) {
+    *APP_DRIVER_DIR.write() = Some(dir.into());
+}
+
+fn try_app_driver_dir() -> Result<Option<(PathBuf, PathBuf)>> {
+    let Some(dir) = APP_DRIVER_DIR.read().clone() else {
+        return Ok(None);
+    };
+    let (node_exe, cli_js) = driver_layout(&dir, host_platform());
+    if node_exe.is_file() && cli_js.is_file() {
+        Ok(Some((node_exe, cli_js)))
+    } else {
+        Err(Error::DriverMisconfigured(format!(
+            "set_driver_dir was given {} but it does not contain both {} and package/cli.js",
+            dir.display(),
+            crate::driver_urls::node_exe_name(host_platform())
+        )))
+    }
+}
+
+/// The name of the driver directory an installer ships beside the app.
+pub(crate) const INSTALLED_DRIVER_DIR: &str = "patchright-driver";
+
+/// Where an installer puts files that ship with an executable at `exe`,
+/// each joined with [`INSTALLED_DRIVER_DIR`]:
+///
+/// - beside the executable: Windows installers, zip/tar distributions, and
+///   Tauri's resource directory on Windows;
+/// - `<exe dir>/../Resources`: a macOS `.app` bundle (`Contents/MacOS/app`
+///   next to `Contents/Resources`), which is Tauri's resource directory there;
+/// - `<exe dir>/../lib/<exe name>`: a Linux package installing
+///   `/usr/bin/app` with its data in `/usr/lib/app`, Tauri's layout for
+///   `.deb` and `.rpm`.
+///
+/// None of these depend on any installer: they are the platforms' usual
+/// homes for an application's files.
+fn installed_driver_candidates(exe: &Path) -> Vec<PathBuf> {
+    let Some(exe_dir) = exe.parent() else {
+        return Vec::new();
+    };
+    let mut candidates = vec![exe_dir.join(INSTALLED_DRIVER_DIR)];
+    if let Some(prefix) = exe_dir.parent() {
+        candidates.push(prefix.join("Resources").join(INSTALLED_DRIVER_DIR));
+        if let Some(stem) = exe.file_stem() {
+            candidates.push(prefix.join("lib").join(stem).join(INSTALLED_DRIVER_DIR));
+        }
+    }
+    candidates
+}
+
+/// A driver an installer placed beside the running executable, at one of
+/// [`installed_driver_candidates`]. Absent directories are skipped silently:
+/// most binaries have none.
+fn try_installed_driver() -> Option<(PathBuf, PathBuf)> {
+    let exe = std::env::current_exe().ok()?;
+    let platform = host_platform();
+    installed_driver_candidates(&exe)
+        .into_iter()
+        .find_map(|dir| {
+            let (node_exe, cli_js) = driver_layout(&dir, platform);
+            (node_exe.is_file() && cli_js.is_file()).then_some((node_exe, cli_js))
+        })
+}
+
 /// Try to find driver from the `PLAYWRIGHT_DRIVER_PATH` override: a directory
 /// holding `node` (or `node.exe` on Windows) and `package/cli.js`.
 ///
@@ -314,7 +414,8 @@ fn try_driver_path_env(
 
 /// Try to find driver in npm global installation (development fallback)
 fn try_npm_global() -> Result<Option<(PathBuf, PathBuf)>> {
-    let output = Command::new("npm").args(["root", "-g"]).output();
+    let output =
+        crate::process::hide_console_std(Command::new("npm").args(["root", "-g"])).output();
 
     if let Ok(output) = output
         && output.status.success()
@@ -333,7 +434,7 @@ fn try_npm_global() -> Result<Option<(PathBuf, PathBuf)>> {
 
 /// Try to find driver in npm local installation (development fallback)
 fn try_npm_local() -> Result<Option<(PathBuf, PathBuf)>> {
-    let output = Command::new("npm").args(["root"]).output();
+    let output = crate::process::hide_console_std(Command::new("npm").args(["root"])).output();
 
     if let Ok(output) = output
         && output.status.success()
@@ -388,7 +489,8 @@ fn find_node_executable() -> Result<PathBuf> {
     #[cfg(windows)]
     let which_cmd = "where";
 
-    if let Ok(output) = Command::new(which_cmd).arg("node").output()
+    if let Ok(output) =
+        crate::process::hide_console_std(Command::new(which_cmd).arg("node")).output()
         && output.status.success()
     {
         let node_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -591,6 +693,7 @@ async fn install_browsers_impl(browsers: Option<&[&str]>, with_deps_forced: bool
     // for browsers and made the CLI's own --with-deps flag a no-op there.
     cmd.args(install_args(browsers, with_deps_forced));
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::process::hide_console(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| {
         Error::LaunchFailed(format!("Failed to spawn browser install process: {}", e))
@@ -658,6 +761,20 @@ fn missing_system_libraries(stdout: &[u8], stderr: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_driver_candidates_cover_the_platform_layouts() {
+        let exe = Path::new("root").join("bin").join("my-app.exe");
+        let prefix = Path::new("root");
+        assert_eq!(
+            installed_driver_candidates(&exe),
+            vec![
+                prefix.join("bin").join("patchright-driver"),
+                prefix.join("Resources").join("patchright-driver"),
+                prefix.join("lib").join("my-app").join("patchright-driver"),
+            ]
+        );
+    }
 
     #[test]
     fn install_args_request_system_deps_only_when_asked() {

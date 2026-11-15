@@ -142,7 +142,8 @@ pub enum AcceptDownloads {
     #[serde(rename = "deny")]
     Deny,
     /// Let the browser handle downloads natively without routing through Playwright.
-    #[serde(rename = "internal")]
+    /// The driver protocol calls this `internal-browser-default`.
+    #[serde(rename = "internal-browser-default")]
     Internal,
 }
 
@@ -1101,7 +1102,7 @@ mod tests {
         for (variant, expected) in [
             (AcceptDownloads::Accept, "accept"),
             (AcceptDownloads::Deny, "deny"),
-            (AcceptDownloads::Internal, "internal"),
+            (AcceptDownloads::Internal, "internal-browser-default"),
         ] {
             let options = BrowserContextOptions::builder()
                 .accept_downloads(variant)

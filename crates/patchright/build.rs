@@ -65,6 +65,22 @@ fn main() {
 
     let platform = detect_platform();
 
+    // `include_bytes!` in the lib needs a file on every build path (skipped,
+    // failed, feature off): an empty one means nothing is embedded. A build
+    // with a driver points the variable at the real archive instead.
+    let empty_archive = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by Cargo"))
+        .join("patchright-driver-none.tar.gz");
+    if let Err(e) = std::fs::write(&empty_archive, []) {
+        println!(
+            "cargo:warning=Could not write {}: {e}",
+            empty_archive.display()
+        );
+    }
+    println!(
+        "cargo:rustc-env=PATCHRIGHT_EMBEDDED_DRIVER={}",
+        empty_archive.display()
+    );
+
     // Skip the download on docs.rs (no network) and for compile-only jobs
     // (e.g. MSRV `cargo check`, mutation testing) that never launch a browser.
     if env::var_os("DOCS_RS").is_some() || env::var_os("PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD").is_some()
@@ -104,6 +120,7 @@ fn main() {
     if node_exe.exists() && cli_js.exists() {
         set_present_env_vars(&driver_dir, platform, source);
         watch(&[&node_exe, &cli_js]);
+        embed(&driver_dir);
         return;
     }
 
@@ -120,6 +137,7 @@ fn main() {
             predate_invocation(&[&node_exe, &cli_js]);
             set_present_env_vars(&driver_dir, platform, source);
             watch(&[&node_exe, &cli_js]);
+            embed(&driver_dir);
         }
         Err(AssemblyError::Pin(message)) => {
             println!("cargo::error=Playwright driver not assembled: {message}");
@@ -186,10 +204,96 @@ fn predate_invocation(files: &[&Path]) {
     }
 }
 
-/// Detect the current platform and return the Playwright platform identifier
+/// Point the lib's `include_bytes!` at a packed copy of `driver_dir`, when
+/// the `bundled-driver` feature is on.
+///
+/// The archive sits beside the driver, as `<driver_dir>.tar.gz`, so it is
+/// packed once per machine like the driver itself: packing ~110 MB runs
+/// unoptimized in a build script and takes most of a minute. It is watched,
+/// so a deleted archive is repacked. A packing failure warns and leaves the
+/// empty archive in place; the build machine still finds its driver on disk.
+fn embed(driver_dir: &Path) {
+    if env::var_os("CARGO_FEATURE_BUNDLED_DRIVER").is_none() {
+        return;
+    }
+    let Some(name) = driver_dir.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let archive = driver_dir.with_file_name(format!("{name}.tar.gz"));
+    if !archive.is_file() {
+        remove_stale_partials(&archive);
+        if let Err(e) = pack_driver(driver_dir, &archive) {
+            println!("cargo:warning=Could not embed the Patchright driver: {e}");
+            return;
+        }
+        predate_invocation(&[&archive]);
+    }
+    println!(
+        "cargo:rustc-env=PATCHRIGHT_EMBEDDED_DRIVER={}",
+        archive.display()
+    );
+    watch(&[&archive]);
+}
+
+/// Delete partial archives a killed build left behind (an IDE restarting
+/// its `cargo check` mid-pack is the usual one). Only those untouched for
+/// 15 minutes, so a concurrent build's file in progress is left alone.
+fn remove_stale_partials(archive: &Path) {
+    let (Some(dir), Some(name)) = (
+        archive.parent(),
+        archive.file_stem().and_then(|n| n.to_str()),
+    ) else {
+        return;
+    };
+    let prefix = format!("{name}.partial-");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(15 * 60));
+        if stale && entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Pack `driver_dir`'s contents, relative to it, into a gzipped tar. Tar
+/// keeps the Unix mode bits, so `node` unpacks executable.
+fn pack_driver(driver_dir: &Path, archive: &Path) -> std::io::Result<()> {
+    // Written beside the target and renamed in, so a killed build never
+    // leaves a truncated archive that later builds would embed.
+    let tmp = archive.with_extension(format!("partial-{}", std::process::id()));
+    let packed = (|| {
+        let file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        tar.follow_symlinks(true);
+        tar.append_dir_all(".", driver_dir)?;
+        let mut file = tar.into_inner()?.finish()?;
+        std::io::Write::flush(&mut file)
+    })();
+    // A concurrent build that renamed its archive in first wins; renaming
+    // onto an existing file fails on Windows, and its copy is as good.
+    let result = packed.and_then(|()| match std::fs::rename(&tmp, archive) {
+        Err(_) if archive.is_file() => Ok(()),
+        other => other,
+    });
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// The Playwright platform identifier of the *target*: the embedded driver
+/// runs where the binary runs, which differs from the host when
+/// cross-compiling.
 fn detect_platform() -> &'static str {
-    let os = env::consts::OS;
-    let arch = env::consts::ARCH;
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| env::consts::OS.to_string());
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| env::consts::ARCH.to_string());
+    let (os, arch) = (os.as_str(), arch.as_str());
     playwright_platform(os, arch).unwrap_or_else(|| {
         println!("cargo:warning=Unsupported platform: {os} {arch}");
         println!("cargo:warning=Defaulting to linux platform");
@@ -218,6 +322,11 @@ fn set_present_env_vars(driver_dir: &Path, platform: &str, source: &str) {
     println!("cargo:rustc-env=PLAYWRIGHT_DRIVER_VERSION={PLAYWRIGHT_VERSION}");
     println!("cargo:rustc-env=PLAYWRIGHT_DRIVER_PLATFORM={platform}");
     println!("cargo:rustc-env=PLAYWRIGHT_DRIVER_DIR_SOURCE={source}");
+    // `links` metadata: a dependent's build script reads these as
+    // DEP_PATCHRIGHT_DRIVER_DIR / _VERSION, which is how a Tauri app finds
+    // the driver to copy into its bundle resources.
+    println!("cargo::metadata=DIR={}", driver_dir.display());
+    println!("cargo::metadata=VERSION={PLAYWRIGHT_VERSION}");
     // Deliberately not PLAYWRIGHT_NODE_EXE / PLAYWRIGHT_CLI_JS: those names are
     // the user's runtime overrides, and cargo injects every rustc-env value
     // into the environment of this crate's own test and bin processes, so

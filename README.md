@@ -68,6 +68,108 @@ Playwright API, with two changes:
 For the recommended undetected configuration, also install Google Chrome and
 see [the undetected setup](#best-practice-the-undetected-setup) below.
 
+## Shipping an application
+
+A binary built with this crate is self-contained: the `bundled-driver`
+feature (on by default) embeds the driver, about 43 MB compressed, in the
+library. On a machine that never built the crate, the first launch unpacks it
+into the user cache (about 2 s, once), and later launches reuse it.
+
+The driver never opens a console window, so a GUI application
+(`#![windows_subsystem = "windows"]`, Tauri, and so on) shows none.
+
+### Shipping the driver through an installer
+
+Cargo has no install step: `cargo build` and `cargo install` never run code on
+the end user's machine. If your application has a real installer (Tauri's
+NSIS/MSI/`.deb`/`.dmg` bundles, WiX, Inno Setup, a distro package, a zip), it
+can ship the driver instead, so it is unpacked at install time. A
+`patchright-driver/` directory is found automatically, with nothing to call,
+when it is in any of these places:
+
+| Where | Who puts it there |
+|---|---|
+| beside the executable | Windows installers, zip/tar archives, Tauri on Windows |
+| `<exe dir>/../Resources/` | a macOS `.app` bundle, Tauri on macOS |
+| `<exe dir>/../lib/<exe name>/` | Linux packages (`/usr/bin/app`, `/usr/lib/app`), Tauri `.deb`/`.rpm` |
+
+Anywhere else, call `patchright_rs::set_driver_dir(dir)` at startup.
+
+1. **Copy the driver into your project at build time.** This crate's build
+   script exposes the driver's location to your `build.rs` as
+   `DEP_PATCHRIGHT_DRIVER_DIR` (it is a direct dependency, so Cargo passes it
+   on). This `build.rs` copies it to `patchright-driver/` beside your
+   `Cargo.toml`, and does it again only when the driver version changes:
+
+   ```rust
+   //! Copies the driver patchright-rs assembled into `patchright-driver/`
+   //! beside this manifest, for an installer to ship next to the executable.
+   use std::path::Path;
+
+   fn main() {
+       // patchright-rs's build script publishes this through its `links` key.
+       // It is unset when that build skipped or failed the driver download.
+       let Ok(src) = std::env::var("DEP_PATCHRIGHT_DRIVER_DIR") else {
+           println!("cargo:warning=patchright-rs has no driver to ship");
+           return;
+       };
+       let dest = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("patchright-driver");
+       let stamp = dest.join(".source");
+       // The source path names the driver and Node versions, so it changes
+       // exactly when the copy is out of date.
+       if std::fs::read_to_string(&stamp).ok().as_deref() == Some(src.as_str()) {
+           return;
+       }
+       let _ = std::fs::remove_dir_all(&dest);
+       copy_dir(Path::new(&src), &dest).expect("copy patchright driver");
+       std::fs::write(&stamp, &src).unwrap();
+   }
+
+   fn copy_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
+       std::fs::create_dir_all(dest)?;
+       for entry in std::fs::read_dir(src)? {
+           let entry = entry?;
+           let to = dest.join(entry.file_name());
+           if entry.file_type()?.is_dir() {
+               copy_dir(&entry.path(), &to)?;
+           } else {
+               std::fs::copy(entry.path(), &to)?; // keeps the executable bit on Unix
+           }
+       }
+       Ok(())
+   }
+   ```
+
+   Add `patchright-driver/` to your `.gitignore`. A Tauri app already has a
+   `build.rs`: put this code before `tauri_build::build()`.
+
+2. **Have the installer ship that directory.** For Tauri, in
+   `tauri.conf.json`:
+
+   ```json
+   "bundle": { "resources": ["patchright-driver/"] }
+   ```
+
+   Tauri copies it to its resource directory, which is one of the places
+   above on every platform, and also does so for `tauri dev`. For another
+   installer, put the directory next to the executable.
+
+3. **Optionally, drop the embedded copy** to save its ~43 MB, since the
+   installer now provides the driver. Turn off default features and keep the
+   others:
+
+   ```toml
+   patchright-rs = { path = "...", default-features = false, features = ["native-tls", "ring", "macros", "route-service"] }
+   ```
+
+   Without the embedded copy, a binary run from outside an installed layout
+   (for example straight from `target/`, without the step 1 copy beside it)
+   still finds the driver in the build machine's cache.
+
+Chromium is not part of the driver. Install it once per machine with
+`patchright-rs install chromium` (see [Setup](#setup)), or launch the user's
+installed Chrome (`.channel("chrome")`, see the undetected setup below).
+
 ## Using the API
 
 **The API is playwright-rs's API, used directly.** Every public type, function

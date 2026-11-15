@@ -91,6 +91,12 @@ impl PlaywrightServer {
             cmd.process_group(0);
         }
 
+        // A GUI application (`windows_subsystem = "windows"`) has no console,
+        // so Windows would open a new console window for `node.exe` and keep
+        // it up for the whole session. The driver's stdio is piped above, so
+        // hiding that console loses nothing. See `crate::process`.
+        crate::process::hide_console(&mut cmd);
+
         let mut child = cmd
             .spawn()
             .map_err(|e| Error::LaunchFailed(format!("Failed to spawn process: {}", e)))?;

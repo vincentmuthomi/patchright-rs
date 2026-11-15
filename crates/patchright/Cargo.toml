@@ -10,13 +10,24 @@ description = "Patchright for Rust: undetected Playwright (Chromium) bindings bu
 keywords = ["patchright", "playwright", "browser", "automation", "stealth"]
 categories = ["development-tools::testing", "web-programming"]
 readme = "../../README.md"
+# Hands the assembled driver's directory to the build script of a crate
+# that depends on this one, as DEP_PATCHRIGHT_DRIVER_DIR: a Tauri app copies
+# it into its bundle resources from there (see README, "Shipping with
+# Tauri"). No native library is linked.
+links = "patchright-driver"
 
 [lib]
 name = "patchright_rs"
 doctest = false  # Disable doc-tests by default (run with: cargo test --doc)
 
 [features]
-default = ["native-tls", "macros", "ring", "route-service"]
+default = ["native-tls", "macros", "ring", "route-service", "bundled-driver"]
+# Embeds the driver (Node + patchright-core, ~40 MB gzipped) in the library,
+# so a binary built with this crate runs on a machine that has never built
+# it: the first launch unpacks the driver into the user cache. Without it,
+# the binary finds the driver at the path the build machine assembled it,
+# in the user cache, or through PLAYWRIGHT_DRIVER_PATH.
+bundled-driver = ["dep:flate2", "dep:tar"]
 native-tls = ["tokio-tungstenite/native-tls"]
 rustls-tls-native-roots = ["dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
 rustls-tls-webpki-roots = ["dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
